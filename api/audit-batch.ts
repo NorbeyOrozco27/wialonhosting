@@ -7,80 +7,79 @@ import { auditarEvento } from '../lib/util.js';
 export default async function handler(req: any, res: any) {
   const ahora = new Date();
   const finTS = Math.floor(ahora.getTime() / 1000);
-  const inicioTS = finTS - (3600 * 3); // Últimas 3 horas
+  const inicioTS = finTS - (3600 * 4); // Últimas 4 horas
 
-  // Fecha hoy en formato Colombia (YYYY-MM-DD)
+  // Fecha hoy Bogota
   const hoyCol = new Intl.DateTimeFormat('en-CA', {
     timeZone: 'America/Bogota',
     year: 'numeric', month: '2-digit', day: '2-digit'
   }).format(ahora);
 
   try {
-    // 1. INTENTO DE LECTURA CON DIAGNÓSTICO
-    const { data: todosLosTurnos, error: errSup } = await supabaseA
-      .from('historial_rodamiento_real')
-      .select('*')
-      .eq('fecha_rodamiento', hoyCol);
+    // 1. CONSULTA PRO: Unimos operacion_diaria con Horarios y Vehículos
+    const { data: planDelDia, error: errSup } = await supabaseA
+      .from('operacion_diaria')
+      .select(`
+        id,
+        fecha,
+        Vehículos ( numero_interno ),
+        Horarios ( hora, destino, origen )
+      `)
+      .eq('fecha', hoyCol);
 
-    // SI HAY ERROR, LO MOSTRAMOS EN PANTALLA
     if (errSup) {
-      return res.status(200).json({ 
-        error: "Error técnico de Supabase", 
-        mensaje: errSup.message,
-        codigo: errSup.code,
-        detalles: errSup.details,
-        fecha_intentada: hoyCol
-      });
+      return res.status(200).json({ error: "Error en Supabase", detalle: errSup.message });
     }
 
-    if (!todosLosTurnos || todosLosTurnos.length === 0) {
-      return res.status(200).json({ 
-        msg: "No se encontraron turnos en Supabase para la fecha de hoy.",
-        fecha_consultada: hoyCol
-      });
+    if (!planDelDia || planDelDia.length === 0) {
+      return res.status(200).json({ msg: "No hay programacion en operacion_diaria para hoy.", fecha: hoyCol });
     }
 
     // 2. PEDIR DATOS A WIALON
     const dataWialon = await ejecutarInformeCosecha(inicioTS, finTS);
     
     if (dataWialon.error_espera) {
-      return res.status(200).json({ success: false, msg: "Wialon procesando. Refresca en 5 segundos." });
+      return res.status(200).json({ success: false, msg: "Wialon está preparando el reporte. Refresca en 5 segundos." });
     }
 
-    const filas = Array.isArray(dataWialon) ? dataWialon : [];
-    if (filas.length === 0) {
-      return res.status(200).json({ success: true, msg: "Sin actividad en Rionegro en el rango consultado." });
-    }
-
+    const filasWialon = Array.isArray(dataWialon) ? dataWialon : [];
     let auditados = 0;
     const batch = db.batch();
 
-    for (const row of filas) {
+    for (const row of filasWialon) {
       const unitVal = row.c[0]?.t || row.c[0] || "";
       const horaGps = row.c[2]?.t || "";
-
-      if (!unitVal || String(unitVal).includes("Total") || unitVal === "---") continue;
       const unitClean = String(unitVal).replace(/^0+/, ''); 
 
-      // 3. BUSQUEDA EN MEMORIA
-      const turno = todosLosTurnos.find(t => String(t.numero_interno) === unitClean);
+      if (!unitVal || unitVal.includes("Total") || unitVal === "---") continue;
 
-      if (turno) {
-        const resultado = auditarEvento(turno, "T. RIONEGRO", horaGps);
+      // 3. MATCH EN MEMORIA: Buscamos en el plan del día
+      // Buscamos el bus y que el destino coincida con lo que el Juez espera
+      const turno = planDelDia.find(p => String((p.Vehículos as any)?.numero_interno) === unitClean);
+
+      if (turno && (turno.Horarios as any)) {
+        // Preparamos el objeto para el Juez (lib/util.ts)
+        const infoParaJuez = {
+            destino: (turno.Horarios as any).destino,
+            hora_turno: (turno.Horarios as any).hora
+        };
+
+        const resultado = auditarEvento(infoParaJuez, "T. RIONEGRO", horaGps);
+        
         if (resultado) {
           auditados++;
-          const idComp = turno.hora_turno.substring(0,5).replace(':','');
+          const idComp = infoParaJuez.hora_turno.substring(0,5).replace(':','');
           const docId = `${unitClean}_${hoyCol.replace(/-/g,'')}_${idComp}`;
 
           const docRef = db.collection('auditoria_viajes').doc(docId);
           batch.set(docRef, {
             bus: unitClean,
-            ruta: turno.ruta,
-            programado: turno.hora_turno,
+            ruta: `${(turno.Horarios as any).origen} -> ${(turno.Horarios as any).destino}`,
+            programado: infoParaJuez.hora_turno,
             desviacion: resultado.desviacion_minutos,
             estado: resultado.estado,
             fecha: hoyCol,
-            actualizado_el: new Date()
+            actualizado: new Date()
           }, { merge: true });
         }
       }
@@ -90,13 +89,12 @@ export default async function handler(req: any, res: any) {
 
     return res.status(200).json({ 
       success: true, 
-      msg: "Auditoría completada",
-      turnos_en_base_datos: todosLosTurnos.length,
-      buses_detectados_gps: filas.length, 
-      auditados_en_firebase: auditados 
+      plan_vuelos_hoy: planDelDia.length,
+      buses_vistos_gps: filasWialon.length, 
+      auditados_firebase: auditados 
     });
 
   } catch (e: any) {
-    return res.status(500).json({ error: "Error fatal en el servidor", mensaje: e.message });
+    return res.status(500).json({ error: e.message });
   }
 }
