@@ -4,44 +4,39 @@ import { db } from '../lib/firebase.js';
 import { ejecutarInformeCosecha } from '../lib/wialon.js';
 
 export default async function handler(req: any, res: any) {
-  // 1. TIMESTAMPS EXACTOS (Bogotá GMT-5)
-  // 00:00:00 Bogota = 05:00:00 UTC
-  // Para el 02 de Enero de 2026:
-  const inicioDiaColombia = 1767330000; 
-  const ahoraUTC = Math.floor(Date.now() / 1000);
-
-  const hoyColombia = "2026-01-02"; // Fecha manual para asegurar el match hoy
+  // Rango: Desde hoy a las 00:00:00 Bogota (1767330000) hasta ahora
+  const inicioTimestamp = 1767330000;
+  const finTimestamp = Math.floor(Date.now() / 1000);
+  const hoyStr = "2026-01-02";
 
   try {
-    const dataWialon = await ejecutarInformeCosecha(inicioDiaColombia, ahoraUTC);
+    const dataWialon = await ejecutarInformeCosecha(inicioTimestamp, finTimestamp);
     
-    // Verificamos si es iterable
-    const filas = Array.isArray(dataWialon) ? dataWialon : [];
-
-    if (filas.length === 0) {
+    if (!dataWialon || dataWialon.length === 0) {
       return res.status(200).json({ 
         success: true, 
-        msg: "Wialon devolvió 0 filas. Revisa si hay buses en la geocerca en la web.",
-        rango_utc: { desde: inicioDiaColombia, hasta: ahoraUTC }
+        msg: "Wialon devolvió una tabla vacía. Revisa si hay buses en la web.",
+        rango: { desde: inicioTimestamp, hasta: finTimestamp }
       });
     }
 
     let auditados = 0;
-    for (const row of filas) {
-      // En reporte 7.1 de grupo: c[0] es Unidad (0101), c[2] es Hora entrada
-      const unitName = row.c[0]?.t || row.c[0] || "";
-      const horaGps = row.c[2]?.t || "";
+    for (const row of dataWialon) {
+      // Mapeo según tu tabla: c[0] es la Unidad (Móvil)
+      const unitVal = row.c[0]?.t || row.c[0] || "";
+      const horaEntradaGps = row.c[2]?.t || row.c[2] || ""; // "02.01.2026 05:23:29"
 
-      if (!unitName || unitName.includes("Total") || unitName === "---") continue;
+      // Limpieza: ignorar filas de "Total" o vacías
+      if (!unitVal || String(unitVal).includes("Total") || String(unitVal) === "---") continue;
 
-      const unitClean = unitName.replace(/^0+/, ''); 
+      const unitClean = String(unitVal).replace(/^0+/, ''); 
 
-      // 2. BUSCAR EN SUPABASE
+      // 1. Buscamos el turno en Supabase
       const { data: turno } = await supabaseA
         .from('historial_rodamiento_real')
         .select('*')
         .eq('numero_interno', unitClean)
-        .eq('fecha_rodamiento', hoyColombia)
+        .eq('fecha_rodamiento', hoyStr)
         .order('hora_turno', { ascending: false })
         .limit(1).single();
 
@@ -49,27 +44,28 @@ export default async function handler(req: any, res: any) {
         auditados++;
         const viajeId = `${unitClean}_20260102_${turno.hora_turno.replace(/:/g,'').substring(0,4)}`;
         
-        // 3. GUARDAR EN FIREBASE
+        // 2. Guardamos en Firebase (Auditamos el bus)
         await db.collection('auditoria_viajes').doc(viajeId).set({
           bus: unitClean,
           ruta: turno.ruta,
           programado: turno.hora_turno,
-          fecha: hoyColombia,
+          fecha: hoyStr,
           ultima_actualizacion: new Date()
         }, { merge: true });
 
-        await db.collection('auditoria_viajes').doc(viajeId).collection('checkpoints').add({
+        await db.collection('auditoria_viajes').doc(viajeId).collection('eventos').add({
           punto: "T. RIONEGRO",
-          hora_gps: horaGps,
-          creado_el: new Date()
+          hora_gps: horaEntradaGps,
+          hora_programada: turno.hora_turno,
+          servidor_fecha: new Date()
         });
       }
     }
 
     return res.status(200).json({ 
       success: true, 
-      total_buses_wialon: filas.length, 
-      auditados_exitosos: auditados 
+      buses_leidos_wialon: dataWialon.length, 
+      auditados_con_exito: auditados 
     });
 
   } catch (e: any) {
