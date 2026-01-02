@@ -34,6 +34,7 @@ export const RUTAS_MAESTRAS: Record<string, any> = {
 export function identificarRuta(destinoDB: string) {
   if (!destinoDB) return null;
   const d = destinoDB.toUpperCase();
+  // Buscamos palabras clave sin importar qué más diga el texto
   if (d.includes("NORTE")) return "NORTE";
   if (d.includes("SUR"))   return "SUR";
   if (d.includes("UNION")) return "UNION";
