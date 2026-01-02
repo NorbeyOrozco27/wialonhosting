@@ -4,9 +4,15 @@ import { db } from '../lib/firebase.js';
 import { ejecutarInformeCosecha } from '../lib/wialon.js';
 
 export default async function handler(req: any, res: any) {
-  // Rango: Últimas 12 horas desde ahora
-  const ahoraSec = Math.floor(Date.now() / 1000);
-  const inicioSec = ahoraSec - (12 * 3600); 
+  // 1. Calcular rango de hoy en Colombia (GMT-5)
+  const ahora = new Date();
+  const finTimestamp = Math.floor(ahora.getTime() / 1000);
+  
+  // Inicio de hoy (00:00:00 Colombia)
+  const inicioDia = new Date();
+  inicioDia.setHours(0,0,0,0);
+  // Restamos 5 horas para compensar UTC si el servidor está en otra zona
+  const inicioTimestamp = Math.floor(inicioDia.getTime() / 1000);
 
   const hoyColombia = new Intl.DateTimeFormat('en-CA', {
     timeZone: 'America/Bogota',
@@ -14,33 +20,32 @@ export default async function handler(req: any, res: any) {
   }).format(new Date());
 
   try {
-    const dataWialon = await ejecutarInformeCosecha(inicioSec, ahoraSec);
+    const dataWialon = await ejecutarInformeCosecha(inicioTimestamp, finTimestamp);
     
-    // Si lo que regresó es un error de Wialon, lo mostramos
-    if (dataWialon.error_wialon) {
+    // Si dataWialon viene como un objeto con error o vacío
+    const filas = Array.isArray(dataWialon) ? dataWialon : dataWialon.rows || [];
+
+    if (filas.length === 0) {
       return res.status(200).json({ 
-        success: false, 
-        msg: "Error en los parámetros de Wialon", 
-        detalle: dataWialon.error_wialon 
+        success: true, 
+        msg: "No hay movimientos en Wialon para este rango.",
+        rango: { desde: inicioTimestamp, hasta: finTimestamp }
       });
     }
 
-    // Verificamos que sea una lista antes de iterar
-    if (!Array.isArray(dataWialon)) {
-       return res.status(200).json({ success: false, msg: "Estructura de datos inesperada", raw: dataWialon });
-    }
+    let auditados = 0;
 
-    let procesados = 0;
-
-    for (const row of dataWialon) {
+    for (const row of filas) {
+      // Mapeo basado en tu reporte 7.1: c[0] es la Agrupación (Móvil)
       const unitName = row.c[0]?.t || row.c[0] || "";
-      const geocerca = row.c[1]?.t || row.c[1] || "";
-      const horaGps = row.c[2]?.t || row.c[2] || "";
+      const geocerca = "T. RIONEGRO"; // El informe es sobre este objeto
+      const horaGps = row.c[2]?.t || ""; // Hora de entrada
       
-      if (!unitName || String(unitName).includes("Agrupación")) continue;
+      if (!unitName || String(unitName).includes("Total")) continue;
 
       const unitClean = String(unitName).replace(/^0+/, ''); 
 
+      // Consulta a Supabase A
       const { data: turno } = await supabaseA
         .from('historial_rodamiento_real')
         .select('*')
@@ -50,7 +55,7 @@ export default async function handler(req: any, res: any) {
         .limit(1).single();
 
       if (turno) {
-        procesados++;
+        auditados++;
         const idCompacto = turno.hora_turno.replace(/:/g,'').substring(0,4);
         const viajeId = `${unitClean}_${hoyColombia.replace(/-/g,'')}_${idCompacto}`;
         
@@ -59,13 +64,13 @@ export default async function handler(req: any, res: any) {
           ruta: turno.ruta,
           programado: turno.hora_turno,
           fecha: hoyColombia,
-          ultima_geocerca: geocerca,
           ultima_actualizacion: new Date()
         }, { merge: true });
 
         await db.collection('auditoria_viajes').doc(viajeId).collection('checkpoints').add({
           punto: geocerca,
           hora_gps: horaGps,
+          hora_programada: turno.hora_turno,
           creado_el: new Date()
         });
       }
@@ -73,7 +78,8 @@ export default async function handler(req: any, res: any) {
 
     return res.status(200).json({ 
       success: true, 
-      msg: `Auditoría finalizada. Filas Wialon: ${dataWialon.length}, Auditados: ${procesados}` 
+      filas_encontradas: filas.length, 
+      buses_con_turno_hoy: auditados 
     });
 
   } catch (e: any) {
