@@ -7,21 +7,38 @@ import { auditarEvento } from '../lib/util.js';
 export default async function handler(req: any, res: any) {
   const ahora = new Date();
   const finTS = Math.floor(ahora.getTime() / 1000);
-  const inicioTS = finTS - (3600 * 2); // Últimas 2 horas
+  const inicioTS = finTS - (3600 * 3); // Últimas 3 horas
 
+  // Fecha hoy en formato Colombia (YYYY-MM-DD)
   const hoyCol = new Intl.DateTimeFormat('en-CA', {
     timeZone: 'America/Bogota',
     year: 'numeric', month: '2-digit', day: '2-digit'
   }).format(ahora);
 
   try {
-    // 1. OBTENER TODOS LOS TURNOS DE HOY DE SUPABASE (1 Sola llamada)
+    // 1. INTENTO DE LECTURA CON DIAGNÓSTICO
     const { data: todosLosTurnos, error: errSup } = await supabaseA
       .from('historial_rodamiento_real')
       .select('*')
       .eq('fecha_rodamiento', hoyCol);
 
-    if (errSup || !todosLosTurnos) throw new Error("Error leyendo Supabase");
+    // SI HAY ERROR, LO MOSTRAMOS EN PANTALLA
+    if (errSup) {
+      return res.status(200).json({ 
+        error: "Error técnico de Supabase", 
+        mensaje: errSup.message,
+        codigo: errSup.code,
+        detalles: errSup.details,
+        fecha_intentada: hoyCol
+      });
+    }
+
+    if (!todosLosTurnos || todosLosTurnos.length === 0) {
+      return res.status(200).json({ 
+        msg: "No se encontraron turnos en Supabase para la fecha de hoy.",
+        fecha_consultada: hoyCol
+      });
+    }
 
     // 2. PEDIR DATOS A WIALON
     const dataWialon = await ejecutarInformeCosecha(inicioTS, finTS);
@@ -32,11 +49,11 @@ export default async function handler(req: any, res: any) {
 
     const filas = Array.isArray(dataWialon) ? dataWialon : [];
     if (filas.length === 0) {
-      return res.status(200).json({ success: true, msg: "Sin actividad en la última hora." });
+      return res.status(200).json({ success: true, msg: "Sin actividad en Rionegro en el rango consultado." });
     }
 
     let auditados = 0;
-    const batch = db.batch(); // Usamos batch de Firebase para más velocidad
+    const batch = db.batch();
 
     for (const row of filas) {
       const unitVal = row.c[0]?.t || row.c[0] || "";
@@ -45,8 +62,8 @@ export default async function handler(req: any, res: any) {
       if (!unitVal || String(unitVal).includes("Total") || unitVal === "---") continue;
       const unitClean = String(unitVal).replace(/^0+/, ''); 
 
-      // 3. BUSCAR EN MEMORIA (Instantáneo)
-      const turno = todosLosTurnos.find(t => t.numero_interno === unitClean);
+      // 3. BUSQUEDA EN MEMORIA
+      const turno = todosLosTurnos.find(t => String(t.numero_interno) === unitClean);
 
       if (turno) {
         const resultado = auditarEvento(turno, "T. RIONEGRO", horaGps);
@@ -62,22 +79,24 @@ export default async function handler(req: any, res: any) {
             programado: turno.hora_turno,
             desviacion: resultado.desviacion_minutos,
             estado: resultado.estado,
-            fecha: hoyCol
+            fecha: hoyCol,
+            actualizado_el: new Date()
           }, { merge: true });
         }
       }
     }
 
-    await batch.commit(); // Guardamos todo en Firebase de un solo golpe
+    await batch.commit();
 
     return res.status(200).json({ 
       success: true, 
-      msg: "Auditoría relámpago completada",
-      buses_detectados: filas.length, 
-      guardados_en_firebase: auditados 
+      msg: "Auditoría completada",
+      turnos_en_base_datos: todosLosTurnos.length,
+      buses_detectados_gps: filas.length, 
+      auditados_en_firebase: auditados 
     });
 
   } catch (e: any) {
-    return res.status(500).json({ error: e.message });
+    return res.status(500).json({ error: "Error fatal en el servidor", mensaje: e.message });
   }
 }
