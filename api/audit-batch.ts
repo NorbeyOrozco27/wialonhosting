@@ -1,33 +1,37 @@
+// api/audit-batch.ts
 import { supabaseA } from '../lib/supabase.js';
 import { db } from '../lib/firebase.js';
 import { ejecutarInformeCosecha } from '../lib/wialon.js';
 
 export default async function handler(req: any, res: any) {
-  // Rango: Hoy 02-01-2026 desde las 00:00 hasta ahora
   const ahora = Math.floor(Date.now() / 1000);
-  const inicioDia = 1767330000; // Unix Timestamp del 02-01-2026 00:00:00
+  const inicioDia = 1767330000; // 02-01-2026 00:00:00
 
   try {
     const dataWialon = await ejecutarInformeCosecha(inicioDia, ahora);
     
-    // Si no hay datos en la tabla
-    if (!dataWialon || !dataWialon.length) {
-        return res.status(200).json({ msg: "No se encontraron movimientos en este rango." });
+    console.log("Filas recibidas de Wialon:", dataWialon.length);
+
+    if (!Array.isArray(dataWialon) || dataWialon.length === 0) {
+        return res.status(200).json({ 
+          msg: "Wialon devolvió 0 filas. Revisa el rango de tiempo o los IDs.",
+          raw: dataWialon 
+        });
     }
 
     let procesados = 0;
 
     for (const row of dataWialon) {
-      // row.c[0].t es la Unidad, row.c[1].t es la Geocerca, row.c[2].t es la Entrada
-      const unitName = row.c[0]?.t || "";
-      const geocerca = row.c[1]?.t || "";
-      const horaGps = row.c[2]?.t || "";
+      // Wialon a veces manda los datos en row.c[0] o row.c[0].t
+      const unitName = row.c[0]?.t || row.c[0] || "";
+      const geocerca = row.c[1]?.t || row.c[1] || "";
+      const horaGps = row.c[2]?.t || row.c[2] || "";
       
-      if (!unitName) continue;
+      if (!unitName || unitName === "Agrupación") continue; // Saltar encabezados
 
-      const unitClean = unitName.replace(/^0+/, ''); // "0101" -> "101"
+      const unitClean = String(unitName).replace(/^0+/, ''); 
 
-      // 1. Buscamos el turno en Supabase A (Mundo A)
+      // 1. Consultar turno en Supabase
       const { data: turno } = await supabaseA
         .from('historial_rodamiento_real')
         .select('*')
@@ -37,16 +41,18 @@ export default async function handler(req: any, res: any) {
 
       if (turno) {
         procesados++;
-        // 2. Guardamos en Firebase (Mundo B - Auditoría)
         const viajeId = `${unitClean}_20260102_${turno.hora_turno.replace(/:/g,'')}`;
         
+        // Guardar/Actualizar viaje
         await db.collection('auditoria_viajes').doc(viajeId).set({
           bus: unitClean,
           ruta: turno.ruta,
           programado: turno.hora_turno,
-          fecha: '2026-01-02'
+          fecha: '2026-01-02',
+          ultima_actualizacion: new Date()
         }, { merge: true });
 
+        // Guardar el evento específico
         await db.collection('auditoria_viajes').doc(viajeId).collection('checkpoints').add({
           punto: geocerca,
           hora_gps: horaGps,
@@ -58,11 +64,10 @@ export default async function handler(req: any, res: any) {
 
     return res.status(200).json({ 
         success: true, 
-        msg: `Auditoría completada. Se procesaron ${procesados} registros de buses.` 
+        msg: `Auditoría completada. Se procesaron ${procesados} buses con turnos activos.` 
     });
 
   } catch (e: any) {
-    console.error(e);
     return res.status(500).json({ error: e.message });
   }
 }
