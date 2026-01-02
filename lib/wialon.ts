@@ -6,40 +6,35 @@ export async function ejecutarInformeCosecha(desde: number, hasta: number) {
   const loginRes = await axios.get(`https://hst-api.wialon.com/wialon/ajax.html?svc=token/login&params={"token":"${token}"}`);
   const sid = loginRes.data.eid;
 
-  if (!sid) throw new Error("No hay SID. Revisa el TOKEN en Vercel.");
+  if (!sid) throw new Error("SID no obtenido");
 
   const reportParams = {
     reportResourceId: 28775158,
     reportTemplateId: 18,
     reportObjectId: 28775158,
     reportObjectSecId: "17", 
-    interval: { from: desde, to: hasta, flags: 16777216 },
+    interval: { from: desde, to: hasta, flags: 0 }, // Flags 0 es más rápido
     remoteExec: 1
   };
 
-  // 1. Pedimos a Wialon que empiece el reporte
+  // 1. Iniciar reporte
   const execRes = await axios.get(`https://hst-api.wialon.com/wialon/ajax.html?svc=report/exec_report&params=${JSON.stringify(reportParams)}&sid=${sid}`);
   
-  // 2. ESPERA CALCULADA: Wialon necesita tiempo para "dibujar" la tabla en su memoria
-  await new Promise(resolve => setTimeout(resolve, 6000)); // Aumentamos a 6 segundos
+  // 2. ESPERA CORTA (Solo 3 segundos, para no agotar a Vercel)
+  await new Promise(resolve => setTimeout(resolve, 3000));
 
-  // 3. Intentamos traer los datos
+  // 3. Traer solo 50 filas (Suficiente para una ventana de 4 horas)
   const selectParams = {
     tableIndex: 0,
-    config: { type: "range", data: { from: 0, to: 100, level: 0, unitInfo: 1 } }
+    config: { type: "range", data: { from: 0, to: 50, level: 0, unitInfo: 1 } }
   };
   
-  let rowsRes = await axios.get(`https://hst-api.wialon.com/wialon/ajax.html?svc=report/select_result_rows&params=${JSON.stringify(selectParams)}&sid=${sid}`);
+  const rowsRes = await axios.get(`https://hst-api.wialon.com/wialon/ajax.html?svc=report/select_result_rows&params=${JSON.stringify(selectParams)}&sid=${sid}`);
+  
+  // Si sigue dando error 5, devolvemos un aviso limpio
+  if (rowsRes.data.error === 5) return { error_espera: true };
 
-  // Si sale error 5 (no listo), intentamos una última vez antes de rendirnos
-  if (rowsRes.data.error === 5) {
-    await new Promise(resolve => setTimeout(resolve, 2000));
-    rowsRes = await axios.get(`https://hst-api.wialon.com/wialon/ajax.html?svc=report/select_result_rows&params=${JSON.stringify(selectParams)}&sid=${sid}`);
-  }
-
-  // 4. Logout (Muy importante para no bloquear la cuenta)
   await axios.get(`https://hst-api.wialon.com/wialon/ajax.html?svc=core/logout&params={}&sid=${sid}`);
 
-  // Devolvemos las filas o el error para diagnóstico
-  return rowsRes.data.error ? { error_wialon: rowsRes.data.error } : (rowsRes.data || []);
+  return rowsRes.data || [];
 }
