@@ -1,32 +1,38 @@
 // lib/config.ts
 
-export const MAPA_TTI = {
-  // MEDELLÍN NORTE (1h 50min = 110 min)
+export const RUTAS_MAESTRAS: Record<string, any> = {
   "NORTE": {
-    tiempo_total: 110,
-    geocercas: ["T.CIT CEJA", "T. NORTE"]
+    checkpoints: [
+      { nombre: "CIT CEJA", tti_esperado: 0 },
+      { nombre: "T. NORTE", tti_esperado: 110 } // 1h 50m
+    ]
   },
-  // MEDELLÍN SUR (1h 50min = 110 min)
   "SUR": {
-    tiempo_total: 110,
-    geocercas: ["T.CIT CEJA", "T.SUR"]
+    checkpoints: [
+      { nombre: "CIT CEJA", tti_esperado: 0 },
+      { nombre: "T. SUR", tti_esperado: 110 } // 1h 50m
+    ]
   },
-  // RIONEGRO (50 min)
   "RIONEGRO": {
-    tiempo_total: 50,
-    geocercas: ["T.CIT CEJA", "T. RIONEGRO"]
+    checkpoints: [
+      { nombre: "CIT CEJA", tti_esperado: 0 },
+      { nombre: "T. RIONEGRO", tti_esperado: 50 }
+    ]
   },
-  // LA UNIÓN (40 min)
   "UNION": {
-    tiempo_total: 40,
-    geocercas: ["T.CIT CEJA", "T. LA UNION 2"]
+    checkpoints: [
+      { nombre: "CIT CEJA", tti_esperado: 0 },
+      { nombre: "T. LA UNION 2", tti_esperado: 40 }
+    ]
   }
 };
 
 /**
- * Esta función identificará qué tipo de ruta es según el destino de la DB
+ * Esta función es el puente: mira el destino de Supabase 
+ * y nos dice qué configuración de tiempo usar.
  */
 export function identificarRuta(destinoDB: string) {
+  if (!destinoDB) return null;
   const d = destinoDB.toUpperCase();
   if (d.includes("NORTE")) return "NORTE";
   if (d.includes("SUR"))   return "SUR";
