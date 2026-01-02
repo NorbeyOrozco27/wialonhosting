@@ -1,32 +1,43 @@
 // lib/util.ts
-import { RUTAS_MAESTRAS, identificarRuta } from './config.js';
+import { CONFIG_VIAJES, identificarRuta } from './config.js';
 
-export function auditarEvento(destino: string, horaTurno: string, nombreGeocerca: string, horaGpsStr: string) {
-  const categoria = identificarRuta(destino);
-  if (!categoria) return null;
+export function auditarTrayecto(destino: string, horaTurno: string, geocercaWialon: string, horaGpsStr: string) {
+  const cat = identificarRuta(destino);
+  if (!cat) return null;
 
-  const configRuta = RUTAS_MAESTRAS[categoria];
-  const cp = configRuta.checkpoints.find((p: any) => p.nombre === nombreGeocerca);
-  if (!cp) return null;
-
-  // Hora programada a minutos
+  const config = CONFIG_VIAJES[cat];
   const [hP, mP] = horaTurno.split(':').map(Number);
-  const minutosProg = hP * 60 + mP;
+  const minutosProgSalida = hP * 60 + mP;
 
-  // Hora GPS a minutos (Toma "05:23:29" de "02.01.2026 05:23:29")
   const parteTiempo = horaGpsStr.split(' ')[1];
-  if (!parteTiempo) return null;
   const [hG, mG] = parteTiempo.split(':').map(Number);
   const minutosGps = hG * 60 + mG;
 
-  const ttiReal = minutosGps - minutosProg;
-  const diferencia = ttiReal - cp.tti_esperado;
+  // ¿Es un evento de SALIDA o de LLEGADA?
+  const esSalida = geocercaWialon === config.salida;
+  const esLlegada = geocercaWialon === config.llegada;
 
-  return {
-    punto: cp.nombre,
-    esperado: cp.tti_esperado,
-    real_tti: ttiReal,
-    retraso_minutos: diferencia,
-    estado: diferencia > 10 ? 'RETRASADO' : diferencia < -10 ? 'ADELANTADO' : 'A TIEMPO'
-  };
+  if (esSalida) {
+    const retrasoSalida = minutosGps - minutosProgSalida;
+    return {
+      tipo_evento: "SALIDA",
+      minutos_retraso_salida: retrasoSalida,
+      hora_salida_gps: parteTiempo,
+      estado_salida: retrasoSalida > 5 ? "TARDE" : "A TIEMPO"
+    };
+  }
+
+  if (esLlegada) {
+    const minutosEsperadosLlegada = minutosProgSalida + config.tti;
+    const retrasoLlegada = minutosGps - minutosEsperadosLlegada;
+    return {
+      tipo_evento: "LLEGADA",
+      hora_llegada_gps: parteTiempo,
+      tti_esperado: config.tti,
+      retraso_llegada_final: retrasoLlegada,
+      estado_llegada: retrasoLlegada > 5 ? "TARDE" : "A TIEMPO"
+    };
+  }
+
+  return null;
 }
