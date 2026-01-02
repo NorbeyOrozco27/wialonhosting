@@ -8,34 +8,29 @@ export async function ejecutarInformeCosecha(desde: number, hasta: number) {
   const loginRes = await axios.get(`https://hst-api.wialon.com/wialon/ajax.html?svc=token/login&params={"token":"${token}"}`);
   const sid = loginRes.data.eid;
 
-  if (!sid) {
-    throw new Error(`Error de autenticación Wialon: ${JSON.stringify(loginRes.data)}`);
-  }
+  if (!sid) throw new Error("No se pudo obtener SID de Wialon");
 
-  // 2. Ejecutar el informe 18 (Exactamente como en tu rastro de red)
+  // 2. Ejecutar informe
   const reportParams = {
     reportResourceId: 28775158,
     reportTemplateId: 18,
     reportObjectId: 28775158,
-    reportObjectSecId: "17", // <--- DEBE SER STRING como en el rastro
-    interval: { 
-      from: Math.floor(desde), 
-      to: Math.floor(hasta), 
-      flags: 16777216 
-    },
+    reportObjectSecId: "17",
+    interval: { from: desde, to: hasta, flags: 16777216 },
     remoteExec: 1
   };
 
   const execRes = await axios.get(`https://hst-api.wialon.com/wialon/ajax.html?svc=report/exec_report&params=${JSON.stringify(reportParams)}&sid=${sid}`);
   
+  // Si Wialon devuelve error en la ejecución, lo capturamos aquí
   if (execRes.data.error) {
-    throw new Error(`Error en exec_report: ${execRes.data.error} - ${JSON.stringify(execRes.data)}`);
+    return { error_wialon: execRes.data };
   }
 
-  // 3. Esperar a que Wialon termine de calcular
-  await new Promise(resolve => setTimeout(resolve, 2500));
+  // 3. Esperar proceso
+  await new Promise(resolve => setTimeout(resolve, 3000));
 
-  // 4. Traer los datos de la tabla
+  // 4. Pedir los datos de la tabla
   const tableParams = {
     tableIndex: 0,
     config: { type: "range", data: { from: 0, to: 100, level: 0, unitInfo: 1 } }
@@ -46,6 +41,6 @@ export async function ejecutarInformeCosecha(desde: number, hasta: number) {
   // 5. Logout
   await axios.get(`https://hst-api.wialon.com/wialon/ajax.html?svc=core/logout&params={}&sid=${sid}`);
 
-  // Devolvemos las filas reales
-  return rowsRes.data.rows || rowsRes.data || []; 
+  // IMPORTANTE: Retornamos las filas si existen, si no un array vacío
+  return rowsRes.data.rows || (Array.isArray(rowsRes.data) ? rowsRes.data : []); 
 }

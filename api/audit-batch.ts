@@ -4,39 +4,33 @@ import { db } from '../lib/firebase.js';
 import { ejecutarInformeCosecha } from '../lib/wialon.js';
 
 export default async function handler(req: any, res: any) {
-  // 1. Calculamos el inicio del día en Colombia (GMT-5)
-  // Independiente de dónde esté el servidor de Vercel
-  const fechaHoy = new Date();
-  const offsetColombia = 5 * 60 * 60 * 1000; // 5 horas en milisegundos
-  
-  // Inicio del día (00:00:00 de hoy en Colombia)
-  const inicioDiaCol = new Date(fechaHoy.setHours(0,0,0,0) - (fechaHoy.getTimezoneOffset() * 60000));
-  const inicioTimestamp = Math.floor(inicioDiaCol.getTime() / 1000) - (5 * 3600); 
-  
-  // Hasta ahora mismo
-  const finTimestamp = Math.floor(Date.now() / 1000);
+  // Rango: Últimas 12 horas desde ahora
+  const ahoraSec = Math.floor(Date.now() / 1000);
+  const inicioSec = ahoraSec - (12 * 3600); 
 
-  const hoyStr = new Intl.DateTimeFormat('en-CA', {
+  const hoyColombia = new Intl.DateTimeFormat('en-CA', {
     timeZone: 'America/Bogota',
     year: 'numeric', month: '2-digit', day: '2-digit'
   }).format(new Date());
 
   try {
-    const dataWialon = await ejecutarInformeCosecha(inicioTimestamp, finTimestamp);
+    const dataWialon = await ejecutarInformeCosecha(inicioSec, ahoraSec);
     
-    // DEBUG: Si Wialon devuelve algo que no es una lista, queremos saberlo
-    if (!dataWialon || dataWialon.length === 0) {
+    // Si lo que regresó es un error de Wialon, lo mostramos
+    if (dataWialon.error_wialon) {
       return res.status(200).json({ 
-        success: true, 
-        msg: "Wialon no reportó movimientos entre las 00:00 y ahora.",
-        rango_consultado: { 
-            desde: new Date(inicioTimestamp * 1000).toLocaleString("es-CO"),
-            hasta: new Date(finTimestamp * 1000).toLocaleString("es-CO")
-        }
+        success: false, 
+        msg: "Error en los parámetros de Wialon", 
+        detalle: dataWialon.error_wialon 
       });
     }
 
-    let auditados = 0;
+    // Verificamos que sea una lista antes de iterar
+    if (!Array.isArray(dataWialon)) {
+       return res.status(200).json({ success: false, msg: "Estructura de datos inesperada", raw: dataWialon });
+    }
+
+    let procesados = 0;
 
     for (const row of dataWialon) {
       const unitName = row.c[0]?.t || row.c[0] || "";
@@ -51,20 +45,20 @@ export default async function handler(req: any, res: any) {
         .from('historial_rodamiento_real')
         .select('*')
         .eq('numero_interno', unitClean)
-        .eq('fecha_rodamiento', hoyStr)
+        .eq('fecha_rodamiento', hoyColombia)
         .order('hora_turno', { ascending: false })
         .limit(1).single();
 
       if (turno) {
-        auditados++;
+        procesados++;
         const idCompacto = turno.hora_turno.replace(/:/g,'').substring(0,4);
-        const viajeId = `${unitClean}_${hoyStr.replace(/-/g,'')}_${idCompacto}`;
+        const viajeId = `${unitClean}_${hoyColombia.replace(/-/g,'')}_${idCompacto}`;
         
         await db.collection('auditoria_viajes').doc(viajeId).set({
           bus: unitClean,
           ruta: turno.ruta,
           programado: turno.hora_turno,
-          fecha: hoyStr,
+          fecha: hoyColombia,
           ultima_geocerca: geocerca,
           ultima_actualizacion: new Date()
         }, { merge: true });
@@ -79,8 +73,7 @@ export default async function handler(req: any, res: any) {
 
     return res.status(200).json({ 
       success: true, 
-      buses_en_reporte: dataWialon.length, 
-      auditados_con_turno: auditados 
+      msg: `Auditoría finalizada. Filas Wialon: ${dataWialon.length}, Auditados: ${procesados}` 
     });
 
   } catch (e: any) {
