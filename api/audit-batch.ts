@@ -5,70 +5,61 @@ import { ejecutarInformeCosecha } from '../lib/wialon.js';
 import { auditarEvento } from '../lib/util.js';
 
 export default async function handler(req: any, res: any) {
-  const hoyStr = "2026-01-02"; // Fecha de tu operación actual
-  const ahora = Math.floor(Date.now() / 1000);
-  const inicioTimestamp = 1767330000; // 00:00:00 Colombia
+  // RANGO: Desde las 00:00 AM de hoy 02-01-2026 hasta ahora (Hora Bogota)
+  const inicioTimestamp = 1767330000; 
+  const finTimestamp = Math.floor(Date.now() / 1000);
+  const hoyStr = "2026-01-02";
 
   try {
-    // 1. Descargar piezas de Supabase (Mundo A)
-    const { data: operacion } = await supabaseA.from('operacion_diaria').select('*').eq('fecha', hoyStr);
-    const { data: vehiculos } = await supabaseA.from('Vehículos').select('id, numero_interno');
-    const { data: horarios } = await supabaseA.from('Horarios').select('id, hora, destino');
-
-    // 2. Descargar reporte de Wialon
-    const filasWialon = await ejecutarInformeCosecha(inicioTimestamp, ahora);
+    const dataWialon = await ejecutarInformeCosecha(inicioTimestamp, finTimestamp);
     
-    if (!Array.isArray(filasWialon) || filasWialon.length === 0) {
-      return res.status(200).json({ success: true, msg: "No hay buses moviéndose en Wialon aún." });
+    // Si Wialon devuelve algo que no es un array, es un mensaje de error o aviso
+    if (!Array.isArray(dataWialon)) {
+      return res.status(200).json({ 
+        success: false, 
+        msg: "Wialon no devolvió una lista de buses.", 
+        respuesta_cruda: dataWialon 
+      });
     }
 
+    if (dataWialon.length === 0) {
+        return res.status(200).json({ 
+          success: true, 
+          msg: "Wialon encontró 0 movimientos en el rango de hoy.",
+          rango: { desde: "00:00 AM", hasta: "Ahora" }
+        });
+    }
+
+    // --- EL PROCESO DE CRUCE (Solo si hay datos) ---
+    // Traemos turnos de Supabase (1 sola vez para ser rápidos)
+    const { data: turnos } = await supabaseA.from('historial_rodamiento_real').select('*').eq('fecha_rodamiento', hoyStr);
+
     let auditados = 0;
-    const batch = db.batch();
+    for (const row of dataWialon) {
+      const unitVal = row.c[0]?.t || row.c[0] || "";
+      const horaGps = row.c[2]?.t || "";
 
-    for (const row of filasWialon) {
-      const unitVal = row.c[0]?.t || row.c[0] || ""; // Unidad
-      const geoVal = row.c[1]?.t || row.c[1] || "";  // Geocerca
-      const horaGps = row.c[2]?.t || "";             // Hora Entrada
-
-      if (!unitVal || unitVal.includes("Total") || unitVal === "---") continue;
+      if (!unitVal || unitVal.includes("Total")) continue;
       const unitClean = String(unitVal).replace(/^0+/, ''); 
 
-      // 3. Cruce de datos en memoria
-      const v = vehiculos?.find(v => String(v.numero_interno) === unitClean);
-      if (!v) continue;
+      const turno = turnos?.find(t => String(t.numero_interno) === unitClean);
 
-      const op = operacion?.find(o => o.vehiculo_id === v.id);
-      if (!op) continue;
-
-      const h = horarios?.find(h => h.id === op.horario_id);
-      if (!h) continue;
-
-      // 4. Auditoría
-      const resultado = auditarEvento(h.destino, h.hora, geoVal, horaGps);
-      
-      if (resultado) {
-        auditados++;
-        const docId = `${unitClean}_20260102_${h.hora.substring(0,5).replace(':','')}`;
-        const docRef = db.collection('auditoria_viajes').doc(docId);
-        
-        batch.set(docRef, {
-          bus: unitClean,
-          programado: h.hora,
-          destino: h.destino,
-          ...resultado,
-          fecha: hoyStr,
-          actualizado: new Date()
-        }, { merge: true });
+      if (turno) {
+        const resultado = auditarEvento(turno.ruta, turno.hora_turno, "T. RIONEGRO", horaGps);
+        if (resultado) {
+          auditados++;
+          const viajeId = `${unitClean}_20260102_${turno.hora_turno.substring(0,5).replace(':','')}`;
+          await db.collection('auditoria_viajes').doc(viajeId).set({
+            bus: unitClean,
+            ...resultado,
+            programado: turno.hora_turno,
+            gps: horaGps
+          }, { merge: true });
+        }
       }
     }
 
-    await batch.commit(); // Guardar todo en Firebase de un golpe
-
-    return res.status(200).json({ 
-      success: true, 
-      msg: `Auditoría Exitosa. Se procesaron ${auditados} turnos.`,
-      detalles: { wialon_filas: filasWialon.length, firebase_guardados: auditados }
-    });
+    return res.status(200).json({ success: true, buses_en_wialon: dataWialon.length, auditados: auditados });
 
   } catch (e: any) {
     return res.status(500).json({ error: e.message });
