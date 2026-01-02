@@ -4,50 +4,50 @@ import axios from 'axios';
 export async function ejecutarInformeCosecha(desde: number, hasta: number) {
   const token = process.env.WIALON_TOKEN;
   
+  // 1. Login
   const loginRes = await axios.get(`https://hst-api.wialon.com/wialon/ajax.html?svc=token/login&params={"token":"${token}"}`);
   const sid = loginRes.data.eid;
 
-  if (!sid) throw new Error("No se pudo obtener SID");
+  if (!sid) throw new Error("No se pudo obtener SID de Wialon");
 
+  // 2. Ejecutar Informe (IDs exactos de tu rastro de red)
   const reportParams = {
     reportResourceId: 28775158,
     reportTemplateId: 18,
     reportObjectId: 28775158,
-    reportObjectSecId: "17", 
+    reportObjectSecId: "17", // Importante: como String
     interval: { 
-      from: desde, 
-      to: hasta, 
-      flags: 16777216 // Flag de intervalo manual
+      from: Math.floor(desde), 
+      to: Math.floor(hasta), 
+      flags: 16777216 
     },
     remoteExec: 1
   };
 
-  // 1. Ejecutar el informe
   const execRes = await axios.get(`https://hst-api.wialon.com/wialon/ajax.html?svc=report/exec_report&params=${JSON.stringify(reportParams)}&sid=${sid}`);
   
-  // 2. Extraer el número de filas de forma segura
-  // Wialon a veces lo pone en reportResult.tables[0].rows o en rowCount
-  const tables = execRes.data?.reportResult?.tables || [];
-  const rowCount = tables.length > 0 ? tables[0].rows : 0;
-  
-  console.log(`Wialon detectó ${rowCount} filas en la tabla.`);
+  if (execRes.data.error) {
+    throw new Error(`Error Wialon exec_report: ${execRes.data.error}`);
+  }
 
-  // 3. Si no hay filas, intentamos pedir al menos las primeras 50 por si el conteo falló
-  const filasAPedir = rowCount > 0 ? rowCount : 50;
+  // 3. Esperar a que el motor de Wialon genere las filas
+  await new Promise(resolve => setTimeout(resolve, 3000));
 
-  // 4. Pequeña espera para que Wialon procese
-  await new Promise(resolve => setTimeout(resolve, 2000));
-
-  // 5. Traer los datos
-  const tableParams = {
+  // 4. SELECCIONAR FILAS (Cambiamos el servicio aquí)
+  // Este es el que nos da el array 'c' con los datos del bus
+  const selectParams = {
     tableIndex: 0,
-    config: { type: "range", data: { from: 0, to: filasAPedir, level: 0, unitInfo: 1 } }
+    config: { 
+      type: "range", 
+      data: { from: 0, to: 100, level: 0 } 
+    }
   };
   
-  const rowsRes = await axios.get(`https://hst-api.wialon.com/wialon/ajax.html?svc=report/get_report_data&params=${JSON.stringify(tableParams)}&sid=${sid}`);
+  const rowsRes = await axios.get(`https://hst-api.wialon.com/wialon/ajax.html?svc=report/select_result_rows&params=${JSON.stringify(selectParams)}&sid=${sid}`);
   
+  // 5. Logout
   await axios.get(`https://hst-api.wialon.com/wialon/ajax.html?svc=core/logout&params={}&sid=${sid}`);
 
-  // Retornamos las filas reales o el objeto completo para diagnosticar
-  return rowsRes.data.rows || rowsRes.data || [];
+  // Retornamos las filas directamente
+  return rowsRes.data || [];
 }
