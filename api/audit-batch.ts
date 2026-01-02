@@ -6,9 +6,8 @@ import { auditarEvento } from '../lib/util.js';
 
 export default async function handler(req: any, res: any) {
   const ahora = new Date();
-  // Rango: Hace 4 horas hasta ahora (Mucho más rápido para Wialon)
-  const finTimestamp = Math.floor(ahora.getTime() / 1000);
-  const inicioTimestamp = finTimestamp - (4 * 3600); 
+  const finTS = Math.floor(ahora.getTime() / 1000);
+  const inicioTS = finTS - (3600 * 2); // Pedimos las últimas 2 horas para seguridad
 
   const hoyCol = new Intl.DateTimeFormat('en-CA', {
     timeZone: 'America/Bogota',
@@ -16,15 +15,15 @@ export default async function handler(req: any, res: any) {
   }).format(ahora);
 
   try {
-    const dataWialon = await ejecutarInformeCosecha(inicioTimestamp, finTimestamp);
+    const dataWialon = await ejecutarInformeCosecha(inicioTS, finTS);
     
     if (dataWialon.error_espera) {
-      return res.status(200).json({ success: false, msg: "Wialon está procesando. Reintenta en 5 segundos." });
+      return res.status(200).json({ success: false, msg: "Wialon sigue procesando. Intenta de nuevo." });
     }
 
     const filas = Array.isArray(dataWialon) ? dataWialon : [];
     if (filas.length === 0) {
-      return res.status(200).json({ success: true, msg: "Sin buses en las últimas 4 horas." });
+      return res.status(200).json({ success: true, msg: "Sin actividad en Rionegro en la última hora." });
     }
 
     let auditados = 0;
@@ -35,7 +34,6 @@ export default async function handler(req: any, res: any) {
       if (!unitVal || String(unitVal).includes("Total") || unitVal === "---") continue;
       const unitClean = String(unitVal).replace(/^0+/, ''); 
 
-      // Buscamos turno en Supabase (Solo lectura)
       const { data: turno } = await supabaseA
         .from('historial_rodamiento_real')
         .select('*')
@@ -48,23 +46,22 @@ export default async function handler(req: any, res: any) {
         const resultado = auditarEvento(turno, "T. RIONEGRO", horaGps);
         if (resultado) {
           auditados++;
-          const idCompacto = turno.hora_turno.substring(0,5).replace(':','');
-          const docId = `${unitClean}_${hoyCol.replace(/-/g,'')}_${idCompacto}`;
+          const idComp = turno.hora_turno.substring(0,5).replace(':','');
+          const docId = `${unitClean}_20260102_${idComp}`;
 
-          // ESCRIBIR EN FIRESTORE
           await db.collection('auditoria_viajes').doc(docId).set({
             bus: unitClean,
             ruta: turno.ruta,
             programado: turno.hora_turno,
-            estado: resultado.estado,
             desviacion: resultado.desviacion_minutos,
-            fecha: hoyCol
+            estado: resultado.estado,
+            ultima_geocerca: "T. RIONEGRO"
           }, { merge: true });
 
           await db.collection('auditoria_viajes').doc(docId).collection('checkpoints').add({
             ...resultado,
             hora_gps: horaGps,
-            fecha_audit: new Date()
+            auditado_el: new Date()
           });
         }
       }
@@ -72,9 +69,9 @@ export default async function handler(req: any, res: any) {
 
     return res.status(200).json({ 
       success: true, 
-      periodo: "Últimas 4 horas",
+      rango: "Última hora",
       buses_detectados: filas.length, 
-      auditados_en_firebase: auditados 
+      guardados_en_firebase: auditados 
     });
 
   } catch (e: any) {
