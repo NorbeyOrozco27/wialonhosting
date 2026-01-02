@@ -2,28 +2,37 @@
 import { supabaseA } from '../lib/supabase.js';
 import { db } from '../lib/firebase.js';
 import { ejecutarInformeCosecha } from '../lib/wialon.js';
+import { auditarEvento } from '../lib/util.js';
 
 export default async function handler(req: any, res: any) {
-  // Rango: Desde las 00:00 AM de hoy 02-01-2026 hasta ahora (Hora Bogota)
-  const inicioTimestamp = 1767330000; 
+  // Rango: Hoy 02-01-2026 desde las 00:00 (Timestamp 1767330000)
+  const inicioTimestamp = 1767330000;
   const finTimestamp = Math.floor(Date.now() / 1000);
   const hoyStr = "2026-01-02";
 
   try {
     const dataWialon = await ejecutarInformeCosecha(inicioTimestamp, finTimestamp);
     
-    if (!Array.isArray(dataWialon)) {
-      return res.status(200).json({ success: false, msg: "Wialon aún no tiene listo el reporte. Refresca en 10 segundos.", error_code: dataWialon });
+    if (dataWialon.error_wialon) {
+      return res.status(200).json({ 
+        success: false, 
+        msg: `Wialon (Error ${dataWialon.error_wialon}): El reporte es muy grande o no está listo. Refresca en 10 segundos.` 
+      });
+    }
+
+    if (!Array.isArray(dataWialon) || dataWialon.length === 0) {
+      return res.status(200).json({ success: true, msg: "Wialon respondió pero la tabla está vacía.", data: dataWialon });
     }
 
     let auditados = 0;
     for (const row of dataWialon) {
       const unitVal = row.c[0]?.t || row.c[0] || "";
-      const horaEntradaGps = row.c[2]?.t || "";
+      const horaGps = row.c[2]?.t || "";
 
-      if (!unitVal || unitVal.includes("Total") || unitVal === "---") continue;
+      if (!unitVal || String(unitVal).includes("Total") || unitVal === "---") continue;
       const unitClean = String(unitVal).replace(/^0+/, ''); 
 
+      // 1. Buscar en Supabase A
       const { data: turno } = await supabaseA
         .from('historial_rodamiento_real')
         .select('*')
@@ -33,34 +42,37 @@ export default async function handler(req: any, res: any) {
         .limit(1).single();
 
       if (turno) {
-        auditados++;
-        // ID: bus_fecha_hora (ej: 101_20260102_0521)
-        const idCompacto = turno.hora_turno.substring(0,5).replace(':','');
-        const docId = `${unitClean}_20260102_${idCompacto}`;
+        // 2. AUDITAR usando tu lib/util.ts
+        const resultado = auditarEvento(turno, "T. RIONEGRO", horaGps);
+        
+        if (resultado) {
+          auditados++;
+          const idCompacto = turno.hora_turno.substring(0,5).replace(':','');
+          const docId = `${unitClean}_20260102_${idCompacto}`;
 
-        // GUARDADO REAL EN FIRESTORE (Aquí es donde aparecerán los datos en tu captura)
-        await db.collection('auditoria_viajes').doc(docId).set({
-          bus: unitClean,
-          ruta: turno.ruta,
-          programado: turno.hora_turno,
-          ultima_captura_gps: horaEntradaGps,
-          servidor_auditado: new Date()
-        }, { merge: true });
+          // 3. GUARDAR EN FIRESTORE (Aquí aparecerán los datos en tu consola)
+          await db.collection('auditoria_viajes').doc(docId).set({
+            bus: unitClean,
+            ruta: turno.ruta,
+            programado: turno.hora_turno,
+            fecha: hoyStr,
+            estado_gps: resultado.estado,
+            desviacion: resultado.desviacion_minutos
+          }, { merge: true });
 
-        // Guardamos el detalle del punto
-        await db.collection('auditoria_viajes').doc(docId).collection('checkpoints').add({
-          punto: "T. RIONEGRO",
-          hora_gps: horaEntradaGps,
-          hora_prog: turno.hora_turno,
-          fecha_proceso: new Date()
-        });
+          await db.collection('auditoria_viajes').doc(docId).collection('checkpoints').add({
+            ...resultado,
+            hora_gps_original: horaGps,
+            auditado_el: new Date()
+          });
+        }
       }
     }
 
     return res.status(200).json({ 
-        success: true, 
-        registros_procesados: dataWialon.length, 
-        auditados_guardados: auditados 
+      success: true, 
+      buses_en_rionegro: dataWialon.length, 
+      auditados_exitosamente: auditados 
     });
 
   } catch (e: any) {
