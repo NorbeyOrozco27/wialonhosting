@@ -2,86 +2,97 @@
 import { supabaseA } from '../lib/supabase.js';
 import { db } from '../lib/firebase.js';
 import { ejecutarInformeCosecha } from '../lib/wialon.js';
-import { auditarTrayecto } from '../lib/util.js'; // <--- ESTA ERA LA LÍNEA QUE FALTABA
+import { auditarMovimiento } from '../lib/util.js';
 
 export default async function handler(req: any, res: any) {
-  const hoyCol = "2026-01-02";
-  const ahoraTS = Math.floor(Date.now() / 1000);
-  const inicioTS = 1767330000; // 00:00 AM Colombia del 2 de enero
+  // REQUISITO 1: FECHA AUTOMÁTICA (Colombia)
+  const hoyCol = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'America/Bogota', year: 'numeric', month: '2-digit', day: '2-digit'
+  }).format(new Date());
+
+  const finTS = Math.floor(Date.now() / 1000);
+  const inicioTS = finTS - (3600 * 8); // Miramos las últimas 8 horas
 
   try {
-    // 1. Traer programación de Supabase (Mundo A)
-    const { data: turnos, error: errSup } = await supabaseA
-        .from('historial_rodamiento_real')
-        .select('*')
-        .eq('fecha_rodamiento', hoyCol);
+    // REQUISITO 2: CONSULTA A operacion_diaria (Transactional)
+    const { data: plan, error } = await supabaseA
+      .from('operacion_diaria')
+      .select(`
+        vehiculo_id,
+        Vehículos ( numero_interno ),
+        Horarios ( hora, origen, destino )
+      `)
+      .eq('fecha', hoyCol);
 
-    if (errSup) throw new Error(errSup.message);
+    if (error) throw error;
 
-    // 2. Traer buses de Wialon (Cosecha Batch)
-    const dataWialon = await ejecutarInformeCosecha(inicioTS, ahoraTS);
+    // 3. COSECHAR WIALON
+    const dataWialon = await ejecutarInformeCosecha(inicioTS, finTS);
     const filas = Array.isArray(dataWialon) ? dataWialon : [];
 
-    if (filas.length === 0) {
-        return res.status(200).json({ success: true, msg: "Sin actividad en Wialon aún." });
-    }
-
-    let totalAuditados = 0;
+    let auditados = 0;
     const batch = db.batch();
 
     for (const row of filas) {
-      // row.c[0] es la unidad (ej: "0110"), row.c[2].t es la hora (ej: "11:17:10")
       const unitVal = row.c[0]?.t || row.c[0] || "";
-      const horaGps = row.c[2]?.t || ""; 
+      const geoVal = row.c[1]?.t || "T. RIONEGRO"; // Asumimos Rionegro por el reporte
+      const horaGps = row.c[2]?.t || "";
 
-      if (!unitVal || unitVal.includes("Total") || unitVal === "---" || !horaGps) continue;
+      if (!unitVal || unitVal.includes("Total") || !horaGps) continue;
+      const unitClean = unitVal.replace(/^0+/, '');
 
-      const unitClean = String(unitVal).replace(/^0+/, '');
+      // REQUISITO 3: COMPARAR SOLO REGISTROS CERCANOS (Matching Inteligente)
+      const hGpsMin = convertirAMinutos(horaGps);
       
-      // Filtramos todos los turnos que tiene este bus asignados hoy
-      const turnosDelBus = turnos?.filter((t: any) => String(t.numero_interno) === unitClean) || [];
+      // Buscamos en el plan de hoy el bus y el turno que esté a menos de 90 min
+      const turnoMatch: any = plan?.find((p: any) => {
+        if (String(p.Vehículos?.numero_interno) !== unitClean) return false;
+        const [h, m] = p.Horarios.hora.split(':').map(Number);
+        return Math.abs(hGpsMin - (h * 60 + m)) < 90; // Ventana de coherencia
+      });
 
-      let mejorAuditoria = null;
-      let mejorTurnoId = "";
-      let menorDiferenciaAbsoluta = 999;
+      if (turnoMatch) {
+        const audit = auditarMovimiento(
+          turnoMatch.Horarios.origen,
+          turnoMatch.Horarios.destino,
+          turnoMatch.Horarios.hora,
+          geoVal,
+          horaGps
+        );
 
-      // PROCESO DE MATCHING: Buscamos el turno que mejor encaje con la hora del GPS
-      for (const turno of turnosDelBus) {
-        // Llamamos al Juez (ahora sí está importado)
-        const auditoria: any = auditarTrayecto(turno.ruta, turno.hora_turno, "T. RIONEGRO", horaGps);
-        
-        // Si el Juez dice que este turno es coherente (< 60 min de diferencia)
-        if (auditoria && Math.abs(auditoria.retraso_llegada) < menorDiferenciaAbsoluta) {
-          menorDiferenciaAbsoluta = Math.abs(auditoria.retraso_llegada);
-          mejorAuditoria = auditoria;
-          mejorTurnoId = `${unitClean}_20260102_${turno.hora_turno.substring(0,5).replace(':','')}`;
+        if (audit) {
+          auditados++;
+          const idViaje = `${unitClean}_${hoyCol.replace(/-/g,'')}_${turnoMatch.Horarios.hora.substring(0,5).replace(':','')}`;
+          const docRef = db.collection('auditoria_viajes').doc(idViaje);
+
+          batch.set(docRef, {
+            bus: unitClean,
+            ruta: `${turnoMatch.Horarios.origen} -> ${turnoMatch.Horarios.destino}`,
+            programado: turnoMatch.Horarios.hora,
+            [audit.evento === "SALIDA" ? "salida_real" : "llegada_real"]: audit.hora_gps,
+            [audit.evento === "SALIDA" ? "retraso_salida" : "retraso_llegada"]: audit.retraso_salida || audit.retraso_llegada,
+            fecha: hoyCol,
+            actualizado: new Date()
+          }, { merge: true });
         }
-      }
-
-      // Si encontramos un turno que encaja, lo preparamos para Firebase
-      if (mejorAuditoria) {
-        totalAuditados++;
-        const docRef = db.collection('auditoria_viajes').doc(mejorTurnoId);
-        batch.set(docRef, {
-          bus: unitClean,
-          ...mejorAuditoria,
-          actualizado: new Date()
-        }, { merge: true });
       }
     }
 
-    // 3. GUARDAR EN FIREBASE (Mundo B)
     await batch.commit();
-
     return res.status(200).json({ 
         success: true, 
-        msg: "Auditoría de proximidad completada",
-        buses_wialon: filas.length,
-        auditados: totalAuditados 
+        fecha: hoyCol,
+        buses_wialon: filas.length, 
+        auditados: auditados 
     });
 
   } catch (e: any) {
-    console.error("Error fatal:", e.message);
     return res.status(500).json({ error: e.message });
   }
+}
+
+function convertirAMinutos(fStr: string) {
+  const t = fStr.split(' ')[1];
+  const [h, m] = t.split(':').map(Number);
+  return h * 60 + m;
 }
