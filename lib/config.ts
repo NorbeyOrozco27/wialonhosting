@@ -1,9 +1,29 @@
-// lib/config.ts
+// lib/config.ts - VERSIÓN CORREGIDA
 export const RUTAS_MAESTRAS: Record<string, any> = {
-  "NORTE": { checkpoints: [{ nombre: "CIT CEJA", tti: 0 }, { nombre: "T. NORTE", tti: 110 }] },
-  "SUR":   { checkpoints: [{ nombre: "CIT CEJA", tti: 0 }, { nombre: "T. SUR", tti: 110 }] },
-  "RIONEGRO": { checkpoints: [{ nombre: "CIT CEJA", tti: 0 }, { nombre: "T. RIONEGRO", tti: 50 }] },
-  "UNION": { checkpoints: [{ nombre: "CIT CEJA", tti: 0 }, { nombre: "T. LA UNION 2", tti: 40 }] }
+  "NORTE": { 
+    checkpoints: [
+      { nombre: "T. CIT CEJA", tti: 0 },     // CAMBIADO de "CIT CEJA"
+      { nombre: "T. NORTE", tti: 110 }       // CAMBIADO de "T. NORTE" (está bien)
+    ] 
+  },
+  "SUR": { 
+    checkpoints: [
+      { nombre: "T. CIT CEJA", tti: 0 },     // CAMBIADO de "CIT CEJA"
+      { nombre: "T. SUR", tti: 110 }         // CAMBIADO de "T. SUR" (está bien)
+    ] 
+  },
+  "RIONEGRO": { 
+    checkpoints: [
+      { nombre: "T. CIT CEJA", tti: 0 },     // CAMBIADO de "CIT CEJA"
+      { nombre: "T. RIONEGRO", tti: 50 }     // CAMBIADO de "T. RIONEGRO" (está bien)
+    ] 
+  },
+  "UNION": { 
+    checkpoints: [
+      { nombre: "T. CIT CEJA", tti: 0 },     // CAMBIADO de "CIT CEJA"
+      { nombre: "T. LA UNION 2", tti: 40 }   // CAMBIADO de "T. LA UNION 2" (está bien)
+    ] 
+  }
 };
 
 export function identificarRuta(destinoDB: string) {
