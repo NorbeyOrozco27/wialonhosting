@@ -1,3 +1,4 @@
+// lib/config.ts
 export const RUTAS_MAESTRAS: Record<string, any> = {
   "NORTE": { checkpoints: [{ nombre: "CIT CEJA", tti: 0 }, { nombre: "T. NORTE", tti: 110 }] },
   "SUR":   { checkpoints: [{ nombre: "CIT CEJA", tti: 0 }, { nombre: "T. SUR", tti: 110 }] },
