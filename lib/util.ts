@@ -1,42 +1,31 @@
 // lib/util.ts
-import { GEOCERCAS_ROLES, TTI_ESTANDAR } from './config.js';
+import { RUTAS_MAESTRAS, identificarRuta } from './config.js';
 
-export function auditarMovimiento(origenDB: string, destinoDB: string, horaTurno: string, geocercaWialon: string, horaGpsStr: string) {
-  // 1. Normalizar nombres
-  const origen = origenDB.toUpperCase();
-  const destino = destinoDB.toUpperCase();
-  
-  // 2. Parsear horas a minutos
+export function auditarMovimiento(destino: string, horaTurno: string, geocercaWialon: string, horaGpsStr: string) {
+  const categoria = identificarRuta(destino);
+  if (!categoria) return null;
+
+  const config = RUTAS_MAESTRAS[categoria];
+  const cp = config.checkpoints.find((p: any) => p.nombre === geocercaWialon);
+  if (!cp) return null;
+
+  // 1. Hora programada a minutos
   const [hP, mP] = horaTurno.split(':').map(Number);
-  const minProgSalida = hP * 60 + mP;
+  const minProg = hP * 60 + mP;
 
-  const parteTiempo = horaGpsStr.split(' ')[1];
+  // 2. Hora GPS a minutos (extrae "15:30" de "02.01.2026 15:30:00")
+  const parteTiempo = horaGpsStr.includes(' ') ? horaGpsStr.split(' ')[1] : horaGpsStr;
   const [hG, mG] = parteTiempo.split(':').map(Number);
   const minGps = hG * 60 + mG;
 
-  // 3. IDENTIFICAR SI ES SALIDA O LLEGADA
-  // Si la geocerca de Wialon coincide con el ORIGEN de la DB -> Es una SALIDA
-  if (origen.includes("CEJA") && geocercaWialon.includes("CIT CEJA")) {
-    const diff = minGps - minProgSalida;
-    return {
-      evento: "SALIDA",
-      retraso_salida: diff,
-      hora_gps: parteTiempo,
-      estado: Math.abs(diff) <= 10 ? "A TIEMPO" : (diff > 10 ? "TARDE" : "ADELANTADO")
-    };
-  }
+  // 3. Cálculo de TTI y diferencia
+  const ttiReal = minGps - minProg;
+  const diferencia = ttiReal - cp.tti;
 
-  // Si la geocerca de Wialon coincide con el DESTINO de la DB -> Es una LLEGADA
-  if (destino.includes("RIONEGRO") && geocercaWialon.includes("RIONEGRO")) {
-    const esperadoLlegada = minProgSalida + 50; // TTI Rionegro
-    const diff = minGps - esperadoLlegada;
-    return {
-      evento: "LLEGADA",
-      retraso_llegada: diff,
-      hora_gps: parteTiempo,
-      estado: Math.abs(diff) <= 10 ? "A TIEMPO" : "RETRASADO"
-    };
-  }
-
-  return null;
+  return {
+    evento: cp.tti === 0 ? "SALIDA" : "LLEGADA",
+    retraso_minutos: diferencia,
+    hora_gps: parteTiempo,
+    estado: diferencia > 10 ? "RETRASADO" : (diferencia < -10 ? "ADELANTADO" : "A TIEMPO")
+  };
 }
