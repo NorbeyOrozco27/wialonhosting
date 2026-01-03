@@ -2,60 +2,86 @@
 import { supabaseA } from '../lib/supabase.js';
 import { db } from '../lib/firebase.js';
 import { ejecutarInformeCosecha } from '../lib/wialon.js';
+import { auditarTrayecto } from '../lib/util.js'; // <--- ESTA ERA LA LÍNEA QUE FALTABA
 
 export default async function handler(req: any, res: any) {
   const hoyCol = "2026-01-02";
-  const ahora = Math.floor(Date.now() / 1000);
-  const inicioTS = 1767330000; // 00:00 AM Colombia
+  const ahoraTS = Math.floor(Date.now() / 1000);
+  const inicioTS = 1767330000; // 00:00 AM Colombia del 2 de enero
 
   try {
-    const { data: turnos } = await supabaseA.from('historial_rodamiento_real').select('*').eq('fecha_rodamiento', hoyCol);
-    const dataWialon = await ejecutarInformeCosecha(inicioTS, ahora);
+    // 1. Traer programación de Supabase (Mundo A)
+    const { data: turnos, error: errSup } = await supabaseA
+        .from('historial_rodamiento_real')
+        .select('*')
+        .eq('fecha_rodamiento', hoyCol);
+
+    if (errSup) throw new Error(errSup.message);
+
+    // 2. Traer buses de Wialon (Cosecha Batch)
+    const dataWialon = await ejecutarInformeCosecha(inicioTS, ahoraTS);
     const filas = Array.isArray(dataWialon) ? dataWialon : [];
 
-    let auditados = 0;
+    if (filas.length === 0) {
+        return res.status(200).json({ success: true, msg: "Sin actividad en Wialon aún." });
+    }
+
+    let totalAuditados = 0;
     const batch = db.batch();
 
     for (const row of filas) {
-      const unitVal = row.c[0]?.t || row.c[0] || ""; // Unidad (0101)
-      const horaEntradaGps = row.c[2]?.t || "";     // Entrada a Rionegro
-      const horaSalidaGps = row.c[3]?.t || "";      // Salida de Rionegro
+      // row.c[0] es la unidad (ej: "0110"), row.c[2].t es la hora (ej: "11:17:10")
+      const unitVal = row.c[0]?.t || row.c[0] || "";
+      const horaGps = row.c[2]?.t || ""; 
 
-      if (!unitVal || unitVal.includes("Total") || unitVal === "---") continue;
-      const unitClean = unitVal.replace(/^0+/, '');
+      if (!unitVal || unitVal.includes("Total") || unitVal === "---" || !horaGps) continue;
 
-      // Buscamos todos los turnos de este bus hoy
-      const turnosBus = turnos?.filter(t => String(t.numero_interno) === unitClean) || [];
+      const unitClean = String(unitVal).replace(/^0+/, '');
+      
+      // Filtramos todos los turnos que tiene este bus asignados hoy
+      const turnosDelBus = turnos?.filter((t: any) => String(t.numero_interno) === unitClean) || [];
 
-      for (const turno of turnosBus) {
-        const idViaje = `${unitClean}_20260102_${turno.hora_turno.substring(0,5).replace(':','')}`;
-        const docRef = db.collection('auditoria_viajes').doc(idViaje);
-        let dataUpdate: any = { bus: unitClean, ruta: turno.ruta, programado: turno.hora_turno, actualizado: new Date() };
+      let mejorAuditoria = null;
+      let mejorTurnoId = "";
+      let menorDiferenciaAbsoluta = 999;
 
-        // LÓGICA A: ¿Este turno termina en Rionegro? (Auditamos LLEGADA)
-        if (turno.ruta.toUpperCase().includes("RIONEGRO") && horaEntradaGps) {
-            dataUpdate.llegada_real = horaEntradaGps;
-            dataUpdate.msg_llegada = "Bus llegó a Rionegro";
-            auditados++;
+      // PROCESO DE MATCHING: Buscamos el turno que mejor encaje con la hora del GPS
+      for (const turno of turnosDelBus) {
+        // Llamamos al Juez (ahora sí está importado)
+        const auditoria: any = auditarTrayecto(turno.ruta, turno.hora_turno, "T. RIONEGRO", horaGps);
+        
+        // Si el Juez dice que este turno es coherente (< 60 min de diferencia)
+        if (auditoria && Math.abs(auditoria.retraso_llegada) < menorDiferenciaAbsoluta) {
+          menorDiferenciaAbsoluta = Math.abs(auditoria.retraso_llegada);
+          mejorAuditoria = auditoria;
+          mejorTurnoId = `${unitClean}_20260102_${turno.hora_turno.substring(0,5).replace(':','')}`;
         }
+      }
 
-        // LÓGICA B: ¿Este turno sale de Rionegro? (Auditamos SALIDA)
-        if (turno.ruta.toUpperCase().includes("CEJA") && turno.origen?.toUpperCase().includes("RIONEGRO") && horaSalidaGps) {
-            dataUpdate.salida_real = horaSalidaGps;
-            dataUpdate.msg_salida = "Bus salió de Rionegro";
-            auditados++;
-        }
-
-        if (Object.keys(dataUpdate).length > 4) {
-            batch.set(docRef, dataUpdate, { merge: true });
-        }
+      // Si encontramos un turno que encaja, lo preparamos para Firebase
+      if (mejorAuditoria) {
+        totalAuditados++;
+        const docRef = db.collection('auditoria_viajes').doc(mejorTurnoId);
+        batch.set(docRef, {
+          bus: unitClean,
+          ...mejorAuditoria,
+          actualizado: new Date()
+        }, { merge: true });
       }
     }
 
+    // 3. GUARDAR EN FIREBASE (Mundo B)
     await batch.commit();
-    return res.status(200).json({ success: true, buses_procesados: filas.length, auditados_en_firebase: auditados });
+
+    return res.status(200).json({ 
+        success: true, 
+        msg: "Auditoría de proximidad completada",
+        buses_wialon: filas.length,
+        auditados: totalAuditados 
+    });
 
   } catch (e: any) {
+    console.error("Error fatal:", e.message);
     return res.status(500).json({ error: e.message });
   }
 }
