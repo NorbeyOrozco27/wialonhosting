@@ -5,93 +5,95 @@ import { ejecutarInformeCosecha } from '../lib/wialon.js';
 import { auditarMovimiento } from '../lib/util.js';
 
 export default async function handler(req: any, res: any) {
-  // REQUISITO 1: FECHA AUTOMÁTICA (Colombia)
-  const hoyCol = new Intl.DateTimeFormat('en-CA', {
-    timeZone: 'America/Bogota', year: 'numeric', month: '2-digit', day: '2-digit'
-  }).format(new Date());
+  // 1. FECHA AUTOMÁTICA SEGURA (YYYY-MM-DD)
+  const hoyCol = new Date().toISOString().split('T')[0];
 
-  const finTS = Math.floor(Date.now() / 1000);
-  const inicioTS = finTS - (3600 * 8); // Miramos las últimas 8 horas
+  const ahoraTS = Math.floor(Date.now() / 1000);
+  const inicioTS = ahoraTS - (3600 * 8); 
 
   try {
-    // REQUISITO 2: CONSULTA A operacion_diaria (Transactional)
-    const { data: plan, error } = await supabaseA
+    // 2. CONSULTA PLANA (Sin Joins complejos que causan error 500)
+    const { data: plan, error: errPlan } = await supabaseA
       .from('operacion_diaria')
-      .select(`
-        vehiculo_id,
-        Vehículos ( numero_interno ),
-        Horarios ( hora, origen, destino )
-      `)
+      .select('vehiculo_id, horario_id')
       .eq('fecha', hoyCol);
 
-    if (error) throw error;
+    if (errPlan) throw new Error(`Error Plan: ${errPlan.message}`);
+
+    // Traemos los maestros para cruzar en memoria (más seguro)
+    const { data: vehiculos } = await supabaseA.from('Vehículos').select('id, numero_interno');
+    const { data: horarios } = await supabaseA.from('Horarios').select('id, hora, origen, destino');
 
     // 3. COSECHAR WIALON
-    const dataWialon = await ejecutarInformeCosecha(inicioTS, finTS);
-    const filas = Array.isArray(dataWialon) ? dataWialon : [];
+    const dataWialon = await ejecutarInformeCosecha(inicioTS, ahoraTS);
+    
+    // Verificamos que Wialon haya devuelto una lista
+    const filas = Array.isArray(dataWialon) ? dataWialon : (dataWialon?.rows || []);
 
-    let auditados = 0;
+    if (filas.length === 0) {
+      return res.status(200).json({ success: true, msg: "Wialon vacío en este rango." });
+    }
+
+    let auditadosCount = 0;
     const batch = db.batch();
 
     for (const row of filas) {
-      const unitVal = row.c[0]?.t || row.c[0] || "";
-      const geoVal = row.c[1]?.t || "T. RIONEGRO"; // Asumimos Rionegro por el reporte
-      const horaGps = row.c[2]?.t || "";
+      // Mapeo: c[0] Unidad, c[2] Hora GPS
+      const unitVal = row.c?.[0]?.t || row.c?.[0] || "";
+      const horaGps = row.c?.[2]?.t || "";
 
-      if (!unitVal || unitVal.includes("Total") || !horaGps) continue;
-      const unitClean = unitVal.replace(/^0+/, '');
+      if (!unitVal || String(unitVal).includes("Total") || !horaGps) continue;
+      const unitClean = String(unitVal).replace(/^0+/, '');
 
-      // REQUISITO 3: COMPARAR SOLO REGISTROS CERCANOS (Matching Inteligente)
-      const hGpsMin = convertirAMinutos(horaGps);
-      
-      // Buscamos en el plan de hoy el bus y el turno que esté a menos de 90 min
-      const turnoMatch: any = plan?.find((p: any) => {
-        if (String(p.Vehículos?.numero_interno) !== unitClean) return false;
-        const [h, m] = p.Horarios.hora.split(':').map(Number);
-        return Math.abs(hGpsMin - (h * 60 + m)) < 90; // Ventana de coherencia
-      });
+      // 4. CRUCE MANUAL EN MEMORIA
+      const vInfo = vehiculos?.find(v => String(v.numero_interno) === unitClean);
+      if (!vInfo) continue;
 
-      if (turnoMatch) {
-        const audit = auditarMovimiento(
-          turnoMatch.Horarios.origen,
-          turnoMatch.Horarios.destino,
-          turnoMatch.Horarios.hora,
-          geoVal,
-          horaGps
-        );
+      const turnoBus = plan?.find(p => p.vehiculo_id === vInfo.id);
+      if (!turnoBus) continue;
 
-        if (audit) {
-          auditados++;
-          const idViaje = `${unitClean}_${hoyCol.replace(/-/g,'')}_${turnoMatch.Horarios.hora.substring(0,5).replace(':','')}`;
-          const docRef = db.collection('auditoria_viajes').doc(idViaje);
+      const hInfo = horarios?.find(h => h.id === turnoBus.horario_id);
+      if (!hInfo) continue;
 
-          batch.set(docRef, {
-            bus: unitClean,
-            ruta: `${turnoMatch.Horarios.origen} -> ${turnoMatch.Horarios.destino}`,
-            programado: turnoMatch.Horarios.hora,
-            [audit.evento === "SALIDA" ? "salida_real" : "llegada_real"]: audit.hora_gps,
-            [audit.evento === "SALIDA" ? "retraso_salida" : "retraso_llegada"]: audit.retraso_salida || audit.retraso_llegada,
-            fecha: hoyCol,
-            actualizado: new Date()
-          }, { merge: true });
-        }
+      // 5. AUDITORÍA
+      const audit = auditarMovimiento(hInfo.origen, hInfo.destino, hInfo.hora, "T. RIONEGRO", horaGps);
+
+      if (audit) {
+        auditadosCount++;
+        const idViaje = `${unitClean}_${hoyCol.replace(/-/g,'')}_${hInfo.hora.substring(0,5).replace(':','')}`;
+        const docRef = db.collection('auditoria_viajes').doc(idViaje);
+
+        batch.set(docRef, {
+          bus: unitClean,
+          ruta: `${hInfo.origen} -> ${hInfo.destino}`,
+          programado: hInfo.hora,
+          [audit.evento === "SALIDA" ? "salida_real" : "llegada_real"]: audit.hora_gps,
+          [audit.evento === "SALIDA" ? "diff_salida" : "diff_llegada"]: audit.retraso_salida || audit.retraso_llegada,
+          fecha: hoyCol,
+          updated: new Date()
+        }, { merge: true });
       }
     }
 
     await batch.commit();
+
     return res.status(200).json({ 
-        success: true, 
-        fecha: hoyCol,
-        buses_wialon: filas.length, 
-        auditados: auditados 
+      success: true, 
+      resumen: {
+        buses_gps: filas.length,
+        auditados: auditadosCount,
+        fecha: hoyCol
+      }
     });
 
   } catch (e: any) {
-    return res.status(500).json({ error: e.message });
+    // Si falla, devolvemos el error exacto para saber qué pasó
+    return res.status(200).json({ success: false, error: e.message });
   }
 }
 
 function convertirAMinutos(fStr: string) {
+  if (!fStr || !fStr.includes(' ')) return 0;
   const t = fStr.split(' ')[1];
   const [h, m] = t.split(':').map(Number);
   return h * 60 + m;
