@@ -1,7 +1,7 @@
 // api/webhook.ts
 import { supabaseA } from '../lib/supabase.js';
 import { db } from '../lib/firebase.js';
-import { auditarTrayecto } from '../lib/util.js';
+import { auditarMovimiento } from '../lib/util.js';
 
 export default async function handler(req: any, res: any) {
   if (req.method !== 'POST') return res.status(405).send('Solo POST');
@@ -9,73 +9,94 @@ export default async function handler(req: any, res: any) {
   const { unit_name, geofence_name, event_time } = req.body;
 
   try {
-    // 1. LIMPIEZA Y FECHA
+    // 1. LIMPIEZA Y FECHA AUTOMÁTICA (Colombia)
     const unitNameClean = unit_name.replace(/^0+/, '');
-    const hoyCol = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Bogota' }).format(new Date());
+    const hoyCol = new Date().toLocaleString("en-CA", {timeZone: "America/Bogota"}).split(',')[0];
 
-    // 2. CONSULTA MUNDO A: Buscamos todos los turnos de este bus para hoy
-    const { data: turnosBus } = await supabaseA
-      .from('historial_rodamiento_real')
-      .select('ruta, hora_turno, destino')
-      .eq('numero_interno', unitNameClean)
-      .eq('fecha_rodamiento', hoyCol);
+    // 2. CONSULTA SEGURA (Mundo A): Traemos las 3 piezas por separado para evitar el Error 500
+    const { data: plan } = await supabaseA
+      .from('operacion_diaria')
+      .select('vehiculo_id, horario_id')
+      .eq('fecha', hoyCol);
 
-    if (!turnosBus || turnosBus.length === 0) {
-      return res.status(200).json({ msg: `Bus ${unitNameClean} sin programación.` });
+    const { data: vehiculos } = await supabaseA.from('Vehículos').select('id, numero_interno');
+    const { data: horarios } = await supabaseA.from('Horarios').select('id, hora, origen, destino');
+
+    if (!plan || !vehiculos || !horarios) {
+        return res.status(200).json({ msg: "Error al cargar maestros de Supabase" });
     }
 
-    // 3. MATCH INTELIGENTE (Proximidad Temporal)
-    // El bus puede estar marcando salida o llegada, buscamos el turno más cercano a la hora del GPS
-    const fechaGps = new Date(event_time);
-    const minutosGps = (fechaGps.getUTCHours() - 5) * 60 + fechaGps.getUTCMinutes();
-    
-    let mejorTurno = null;
-    let difMinima = 90; // Margen de 1.5 horas para asociar un evento a un turno
+    // 3. MATCH INTELIGENTE: Buscamos el bus y el turno más cercano a la hora del GPS
+    const vInfo = vehiculos.find(v => String(v.numero_interno) === unitNameClean);
+    if (!vInfo) return res.status(200).json({ msg: `Bus ${unitNameClean} no existe en la base de datos.` });
 
-    for (const t of turnosBus) {
-        const [h, m] = t.hora_turno.split(':').map(Number);
-        const diff = Math.abs(minutosGps - (h * 60 + m));
-        if (diff < difMinima) {
-            difMinima = diff;
-            mejorTurno = t;
+    // Filtramos los turnos de este bus para hoy
+    const turnosHoy = plan.filter(p => p.vehiculo_id === vInfo.id);
+    
+    // Parseamos la hora actual del GPS para buscar proximidad
+    const tiempoGpsRaw = event_time.includes(' ') ? event_time.split(' ')[1] : event_time;
+    const [hG, mG] = tiempoGpsRaw.split(':').map(Number);
+    const minutosGps = hG * 60 + mG;
+
+    let mejorTurno: any = null;
+    let difMinima = 120; // Ventana de 2 horas para asociar el evento
+
+    for (const p of turnosHoy) {
+        const hInfo = horarios.find(h => h.id === p.horario_id);
+        if (hInfo) {
+            const [hP, mP] = hInfo.hora.split(':').map(Number);
+            const diff = Math.abs(minutosGps - (hP * 60 + mP));
+            if (diff < difMinima) {
+                difMinima = diff;
+                mejorTurno = { ...p, ...hInfo };
+            }
         }
     }
 
     if (!mejorTurno) {
-        return res.status(200).json({ msg: "Evento GPS demasiado alejado de cualquier turno programado." });
+      return res.status(200).json({ msg: "El evento GPS no coincide con ningún turno programado para hoy." });
     }
 
-    // 4. AUDITORÍA DE TRAYECTO (La nueva lógica narrativa)
-    const resultado: any = auditarTrayecto(mejorTurno.destino, mejorTurno.hora_turno, geofence_name, event_time);
+    // 4. AUDITORÍA NARRATIVA (Usa auditarMovimiento de util.ts)
+    const audit = auditarMovimiento(
+        mejorTurno.origen, 
+        mejorTurno.destino, 
+        mejorTurno.hora, 
+        geofence_name, 
+        event_time
+    );
 
-    if (!resultado) {
-      return res.status(200).json({ msg: "Punto de paso no auditable para este trayecto." });
+    if (!audit) {
+      return res.status(200).json({ msg: "Punto de paso no auditable (Taller u otro)." });
     }
 
     // 5. GUARDAR EN MUNDO B (Firebase)
-    // Usamos el ID compacto para que Salida y Llegada caigan en el mismo ticket
-    const idComp = mejorTurno.hora_turno.substring(0,5).replace(':','');
+    const idComp = mejorTurno.hora.substring(0,5).replace(':','');
     const viajeId = `${unitNameClean}_${hoyCol.replace(/-/g,'')}_${idComp}`;
     
     const docRef = db.collection('auditoria_viajes').doc(viajeId);
 
-    // Guardamos con MERGE:TRUE para no borrar lo que ya estaba (ej: si ya se marcó la salida)
+    // Guardamos con MERGE para tener Salida y Llegada en el mismo ticket
     await docRef.set({
       bus: unitNameClean,
-      ruta: mejorTurno.ruta,
-      programado_salida: mejorTurno.hora_turno,
-      ...resultado, // Esto inyectará hora_salida_gps O hora_llegada_gps según el punto
-      actualizado_en_vivo: new Date()
+      ruta: `${mejorTurno.origen} -> ${mejorTurno.destino}`,
+      programado: mejorTurno.hora,
+      [audit.evento === "SALIDA" ? "salida_real" : "llegada_real"]: audit.hora_gps,
+      [audit.evento === "SALIDA" ? "diff_salida" : "diff_llegada"]: audit.retraso_salida || audit.retraso_llegada,
+      estado_actual: audit.estado,
+      fecha: hoyCol,
+      ultima_actualizacion: new Date()
     }, { merge: true });
 
     return res.status(200).json({ 
         success: true, 
-        evento: resultado.tipo_evento, 
-        viaje: mejorTurno.ruta 
+        evento: audit.evento, 
+        bus: unitNameClean,
+        retraso: audit.retraso_salida || audit.retraso_llegada 
     });
 
   } catch (e: any) {
-    console.error("Error Webhook:", e.message);
+    console.error("Error en Webhook:", e.message);
     return res.status(500).json({ error: e.message });
   }
 }

@@ -1,41 +1,40 @@
 // lib/util.ts
-import { CONFIG_VIAJES, identificarRuta } from './config.js';
+import { GEOCERCAS_ROLES, TTI_ESTANDAR } from './config.js';
 
-export function auditarTrayecto(destino: string, horaTurno: string, geocercaWialon: string, horaGpsStr: string) {
-  const cat = identificarRuta(destino);
-  if (!cat) return null;
-
-  const config = CONFIG_VIAJES[cat];
+export function auditarMovimiento(origenDB: string, destinoDB: string, horaTurno: string, geocercaWialon: string, horaGpsStr: string) {
+  // 1. Normalizar nombres
+  const origen = origenDB.toUpperCase();
+  const destino = destinoDB.toUpperCase();
+  
+  // 2. Parsear horas a minutos
   const [hP, mP] = horaTurno.split(':').map(Number);
-  const minutosProgSalida = hP * 60 + mP;
+  const minProgSalida = hP * 60 + mP;
 
   const parteTiempo = horaGpsStr.split(' ')[1];
   const [hG, mG] = parteTiempo.split(':').map(Number);
-  const minutosGps = hG * 60 + mG;
+  const minGps = hG * 60 + mG;
 
-  // ¿Es un evento de SALIDA o de LLEGADA?
-  const esSalida = geocercaWialon === config.salida;
-  const esLlegada = geocercaWialon === config.llegada;
-
-  if (esSalida) {
-    const retrasoSalida = minutosGps - minutosProgSalida;
+  // 3. IDENTIFICAR SI ES SALIDA O LLEGADA
+  // Si la geocerca de Wialon coincide con el ORIGEN de la DB -> Es una SALIDA
+  if (origen.includes("CEJA") && geocercaWialon.includes("CIT CEJA")) {
+    const diff = minGps - minProgSalida;
     return {
-      tipo_evento: "SALIDA",
-      minutos_retraso_salida: retrasoSalida,
-      hora_salida_gps: parteTiempo,
-      estado_salida: retrasoSalida > 5 ? "TARDE" : "A TIEMPO"
+      evento: "SALIDA",
+      retraso_salida: diff,
+      hora_gps: parteTiempo,
+      estado: Math.abs(diff) <= 10 ? "A TIEMPO" : (diff > 10 ? "TARDE" : "ADELANTADO")
     };
   }
 
-  if (esLlegada) {
-    const minutosEsperadosLlegada = minutosProgSalida + config.tti;
-    const retrasoLlegada = minutosGps - minutosEsperadosLlegada;
+  // Si la geocerca de Wialon coincide con el DESTINO de la DB -> Es una LLEGADA
+  if (destino.includes("RIONEGRO") && geocercaWialon.includes("RIONEGRO")) {
+    const esperadoLlegada = minProgSalida + 50; // TTI Rionegro
+    const diff = minGps - esperadoLlegada;
     return {
-      tipo_evento: "LLEGADA",
-      hora_llegada_gps: parteTiempo,
-      tti_esperado: config.tti,
-      retraso_llegada_final: retrasoLlegada,
-      estado_llegada: retrasoLlegada > 5 ? "TARDE" : "A TIEMPO"
+      evento: "LLEGADA",
+      retraso_llegada: diff,
+      hora_gps: parteTiempo,
+      estado: Math.abs(diff) <= 10 ? "A TIEMPO" : "RETRASADO"
     };
   }
 
