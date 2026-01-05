@@ -1,152 +1,73 @@
-// api/webhook.ts - VERSIÓN CORREGIDA Y TYPESCRIPT-SAFE
+// api/webhook.ts
 import { supabaseA } from '../lib/supabase.js';
 import { db } from '../lib/firebase.js';
-import { auditarMovimiento } from '../lib/util.js';
+import { auditarMovimiento, ResultadoAuditoria } from '../lib/util.js'; // Importar interfaz
 
 export default async function handler(req: any, res: any) {
-  // 1. VERIFICAR MÉTODO (webhook POST)
-  if (req.method !== 'POST') {
-    return res.status(405).json({ success: false, error: 'Método no permitido' });
+  if (req.method !== 'POST') return res.status(405).send('Only POST');
+
+  const { unitId, geofenceName, eventTime } = req.body;
+  
+  if (!unitId || !geofenceName || !eventTime) {
+    return res.status(400).json({ error: 'Faltan datos' });
   }
 
+  const hoyCol = "2026-01-05"; // Fecha fija para tu prueba
+  const unitClean = String(unitId).replace(/^0+/, '');
+
   try {
-    // 2. OBTENER DATOS DEL WEBHOOK
-    const { unitId, geofenceName, eventTime } = req.body;
-    
-    // Si no viene en body, intentar query params (para pruebas)
-    const unitVal = unitId || req.query.unit;
-    const geocercaWialon = geofenceName || req.query.geofence;
-    const horaGps = eventTime || req.query.time;
-
-    if (!unitVal || !geocercaWialon || !horaGps) {
-      return res.status(400).json({ 
-        success: false, 
-        error: 'Faltan parámetros',
-        recibido: req.body
-      });
-    }
-
-    // 3. FECHA ACTUAL COLOMBIA
-    const ahora = new Date();
-    const hoyCol = ahora.toLocaleDateString('en-CA', { timeZone: 'America/Bogota' });
-
-    // 4. BUSCAR EN SUPABASE
     const { data: vehiculos } = await supabaseA.from('Vehículos')
-      .select('id, numero_interno');
-    
-    const { data: plan } = await supabaseA.from('operacion_diaria')
-      .select('vehiculo_id, horario_id')
-      .eq('fecha', hoyCol);
-    
-    const { data: horarios } = await supabaseA.from('Horarios')
-      .select('id, hora, destino');
+      .select('id')
+      .eq('numero_interno', unitClean)
+      .single();
 
-    // 5. LIMPIAR ID DEL BUS
-    const unitClean = String(unitVal).replace(/^0+/, '');
-    
-    // 6. BUSCAR VEHÍCULO
-    const vInfo = vehiculos?.find(v => String(v.numero_interno) === unitClean);
-    
-    if (!vInfo) {
-      return res.status(200).json({ 
-        success: true, 
-        mensaje: `Bus ${unitClean} no encontrado en Supabase`,
-        unit_clean: unitClean,
-        unit_original: unitVal
-      });
+    if (!vehiculos) return res.json({ msg: "Bus no encontrado" });
+
+    const { data: turnos } = await supabaseA.from('operacion_diaria')
+      .select('horario_id')
+      .eq('fecha', hoyCol)
+      .eq('vehiculo_id', vehiculos.id);
+
+    if (!turnos || turnos.length === 0) return res.json({ msg: "Sin turnos hoy" });
+
+    // Buscar el horario en Supabase para obtener destino y hora
+    const idsHorarios = turnos.map(t => t.horario_id);
+    const { data: infoHorarios } = await supabaseA.from('Horarios')
+      .select('id, hora, destino')
+      .in('id', idsHorarios);
+
+    let resultado: ResultadoAuditoria | null = null;
+    let horarioMatch = null;
+
+    if (infoHorarios) {
+        for (const h of infoHorarios) {
+            const audit = auditarMovimiento(h.destino, h.hora, geofenceName, eventTime);
+            if (audit) {
+                resultado = audit;
+                horarioMatch = h;
+                break;
+            }
+        }
     }
 
-    // 7. OBTENER TURNOS DEL BUS
-    const turnosBus = plan?.filter(p => p.vehiculo_id === vInfo.id) || [];
-    
-    if (turnosBus.length === 0) {
-      return res.status(200).json({ 
-        success: true, 
-        mensaje: `Bus ${unitClean} no tiene turnos programados hoy`,
-        fecha: hoyCol
-      });
-    }
-
-    let auditado = false;
-    let resultadoAuditoria: any = null; // EXPLICITA: puede ser null
-    let docId: string | null = null;
-
-    // 8. AUDITAR CADA TURNO
-    for (const tAsignado of turnosBus) {
-      const hInfo = horarios?.find(h => h.id === tAsignado.horario_id);
-      if (!hInfo) continue;
-
-      const audit = auditarMovimiento(hInfo.destino, hInfo.hora, geocercaWialon, horaGps);
-      
-      if (audit) {
-        auditado = true;
-        resultadoAuditoria = audit;
+    if (resultado && horarioMatch) {
+        const docId = `${unitClean}_${hoyCol}_${horarioMatch.hora.replace(':','')}`;
         
-        // 9. CREAR ID ÚNICO
-        const idComp = hInfo.hora.substring(0, 5).replace(':', '');
-        docId = `${unitClean}_${hoyCol.replace(/-/g, '')}_${idComp}`;
-        
-        // 10. GUARDAR EN FIREBASE
         await db.collection('auditoria_viajes').doc(docId).set({
-          bus: unitClean,
-          bus_wialon: unitVal,
-          ruta: hInfo.destino,
-          programado: hInfo.hora,
-          gps_llegada: audit.hora_gps,
-          geocerca_wialon: geocercaWialon,
-          evento: audit.evento,
-          retraso_minutos: audit.retraso_minutos,
-          estado: audit.estado,
-          fecha: hoyCol,
-          timestamp: new Date(),
-          fuente: 'webhook',
-          webhook_recibido: {
-            unitId: unitVal,
-            geofenceName: geocercaWialon,
-            eventTime: horaGps,
-            receivedAt: ahora.toISOString()
-          }
+            bus: unitClean,
+            estado: resultado.estado, // TypeScript ahora feliz
+            retraso: resultado.retraso_minutos,
+            geocerca: geofenceName,
+            hora_gps: resultado.hora_gps,
+            timestamp: new Date()
         }, { merge: true });
-        
-        break;
-      }
+
+        return res.json({ success: true, audit: resultado });
     }
 
-    // 11. RESPUESTA - ¡CORREGIDO!
-    if (auditado && resultadoAuditoria) { // ← VALIDACIÓN AÑADIDA
-      return res.status(200).json({
-        success: true,
-        mensaje: 'Auditoría registrada exitosamente',
-        auditoria: {
-          bus: unitClean,
-          geocerca: geocercaWialon,
-          hora_gps: resultadoAuditoria.hora_gps, // ← AHORA SEGURO
-          estado: resultadoAuditoria.estado,     // ← AHORA SEGURO
-          retraso: resultadoAuditoria.retraso_minutos, // ← AHORA SEGURO
-          documento_id: docId
-        },
-        procesado_en: ahora.toLocaleString('es-CO', { timeZone: 'America/Bogota' })
-      });
-    } else {
-      return res.status(200).json({
-        success: true,
-        mensaje: 'Evento recibido pero no coincide con ningún turno',
-        datos_recibidos: {
-          bus: unitVal,
-          bus_clean: unitClean,
-          geocerca: geocercaWialon,
-          hora: horaGps // ← CORREGIDO: era "hora6ps"
-        },
-        turnos_del_bus: turnosBus.length
-      });
-    }
+    return res.json({ success: false, msg: "No coincide con ningún turno" });
 
-  } catch (error: any) {
-    console.error('Error en webhook:', error);
-    return res.status(200).json({
-      success: false,
-      error: error.message,
-      stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
-    });
+  } catch (e: any) {
+    return res.status(500).json({ error: e.message });
   }
 }
