@@ -1,4 +1,4 @@
-// lib/wialon.ts - VERSIÓN DATA MINING (INFALIBLE)
+// lib/wialon.ts - VERSIÓN REPORTE FANTASMA
 import axios from 'axios';
 
 const getErrorMessage = (error: unknown) => {
@@ -10,8 +10,13 @@ export async function ejecutarInformeCosecha(desde: number, hasta: number) {
   const token = process.env.WIALON_TOKEN;
   if (!token) throw new Error("WIALON_TOKEN no configurado");
 
-  const GROUP_ID = 28865342; // Grupo TRANSUNIDOS
+  // IDs base
+  const RESOURCE_ID = 28775158; 
+  // Vamos a ejecutarlo sobre el GRUPO completo para maximizar probabilidad de datos
+  const OBJECT_ID   = 28865342; // Grupo TRANSUNIDOS
+
   let sid = '';
+  let tempReportId = 0;
   
   try {
     // 1. LOGIN
@@ -20,102 +25,132 @@ export async function ejecutarInformeCosecha(desde: number, hasta: number) {
     sid = loginRes.data.eid;
     if (!sid) throw new Error("Login falló");
 
-    // 2. OBTENER UNIDADES
-    console.log(`🔍 WIALON: Buscando unidades del grupo ${GROUP_ID}...`);
-    const groupRes = await axios.get(
-        `https://hst-api.wialon.com/wialon/ajax.html?svc=core/search_item&params={"id":${GROUP_ID},"flags":1}&sid=${sid}`
+    // 2. CREAR REPORTE TEMPORAL (Esto es la clave)
+    // Creamos un reporte "limpio" de Geocercas, sin filtros raros
+    console.log("🛠️ WIALON: Creando reporte temporal limpio...");
+    
+    const createParams = {
+        itemId: RESOURCE_ID,
+        id: 0,
+        callMode: "create",
+        n: "API_TEMP_GEO_" + Math.floor(Math.random() * 1000),
+        ct: "avl_unit", // Tipo Unidad (para iterar sobre el grupo)
+        p: "",
+        tbl: [{
+            n: "unit_zone_visits", // Tabla de Geocercas
+            l: "Geocercas",
+            c: "", cl: "", cp: "", p: "", f: 0,
+            // Columnas: Unidad, Geocerca, Entrada, Salida
+            sl: "[\"asset_name\",\"zone_name\",\"time_in\",\"time_out\"]", 
+            s: ""
+        }]
+    };
+
+    const createRes = await axios.get(
+        `https://hst-api.wialon.com/wialon/ajax.html?svc=report/update_report&params=${JSON.stringify(createParams)}&sid=${sid}`
     );
-    const unitIds = groupRes.data.item?.u || [];
+
+    if (createRes.data.error) throw new Error(`Error creando reporte: ${createRes.data.error}`);
+    // El ID del reporte nuevo viene en el array de respuesta [ID, {datos...}]
+    tempReportId = createRes.data[0]; 
+    console.log(`✅ Reporte temporal creado: ID ${tempReportId}`);
+
+    // 3. EJECUTAR EL REPORTE NUEVO
+    const reportParams = {
+      reportResourceId: RESOURCE_ID,
+      reportTemplateId: tempReportId,
+      reportObjectId: OBJECT_ID, // Ejecutamos sobre el GRUPO
+      reportObjectSecId: 0,
+      interval: { from: desde, to: hasta, flags: 0 },
+      remoteExec: 1
+    };
+
+    const execRes = await axios.get(
+      `https://hst-api.wialon.com/wialon/ajax.html?svc=report/exec_report&params=${JSON.stringify(reportParams)}&sid=${sid}`,
+      { timeout: 30000 }
+    );
     
-    if (unitIds.length === 0) throw new Error("Grupo vacío");
-    
-    // ⚠️ FILTRO DE SEGURIDAD PARA VERCEL
-    // Procesar 600 buses raw data causará timeout.
-    // Vamos a procesar el bus que SABEMOS que tiene datos + otros 19 aleatorios
-    const busConocido = 28645824;
-    const listaReducida = unitIds.filter((id: number) => id === busConocido)
-                                 .concat(unitIds.filter((id: number) => id !== busConocido).slice(0, 19));
+    if (execRes.data.error) throw new Error(`Error Exec: ${execRes.data.error}`);
 
-    console.log(`✅ Grupo tiene ${unitIds.length} unidades. Escaneando ${listaReducida.length} buses (incluido el ${busConocido}) usando RAW DATA...`);
-
-    const filasSimuladas: any[] = [];
-
-    // 3. MINERÍA DE DATOS (Iteramos los buses seleccionados)
-    // Usamos Promise.all para hacerlo paralelo y rápido
-    const promesas = listaReducida.map(async (unitId: number) => {
-        try {
-            // A. Obtener nombre del bus
-            const unitInfo = await axios.get(
-                `https://hst-api.wialon.com/wialon/ajax.html?svc=core/search_item&params={"id":${unitId},"flags":1}&sid=${sid}`
-            );
-            const nombreBus = unitInfo.data.item?.nm;
-
-            // B. Descargar mensajes (RAW DATA)
-            // loadCount: 1000 para no saturar memoria, flags: 0 (GPS data)
-            const msgsRes = await axios.get(
-                `https://hst-api.wialon.com/wialon/ajax.html?svc=messages/load_interval&params={"itemId":${unitId},"timeFrom":${desde},"timeTo":${hasta},"flags":0,"flagsMask":65280,"loadCount":1000}&sid=${sid}`
-            );
-
-            const mensajes = msgsRes.data.messages || [];
-            if (mensajes.length === 0) return;
-
-            // C. Simular estructura de reporte
-            // Tomamos una muestra de mensajes (cada 20 mensajes) para no sobrecargar
-            // Y buscamos geocercas manualmente si pudiéramos, pero por ahora
-            // usaremos la ubicación cruda.
-            
-            // IMPORTANTE: Como no tenemos geocercas calculadas en raw data,
-            // enviaremos la posición (lat,lon) en el campo de dirección
-            // audit-batch tendrá que ser inteligente o actualizaremos util.ts después.
-            
-            // Para que audit-batch funcione YA, vamos a "imitar" que pasó por una geocerca
-            // si el mensaje tiene velocidad 0 (parada).
-            
-            mensajes.forEach((msg: any, index: number) => {
-                // Solo guardamos 1 de cada 50 mensajes para no explotar la memoria
-                // O si es velocidad 0 (parada posible en terminal)
-                if (index % 50 === 0 || msg.pos?.s === 0) {
-                    const hora = new Date(msg.t * 1000).toISOString().substr(11, 8); // HH:MM:SS
-                    
-                    filasSimuladas.push({
-                        c: [
-                            { t: nombreBus }, // Col 0: Bus
-                            { t: "Ubicación GPS Raw" }, // Col 1: Geocerca (Placeholder)
-                            { t: hora } // Col 2: Hora
-                        ],
-                        // Datos extra para lógica avanzada
-                        bus_contexto: nombreBus,
-                        lat: msg.pos?.y,
-                        lon: msg.pos?.x,
-                        timestamp: msg.t
-                    });
-                }
-            });
-
-        } catch (err) {
-            console.error(`Error procesando bus ${unitId}`);
-        }
-    });
-
-    await Promise.all(promesas);
-
-    await axios.get(`https://hst-api.wialon.com/wialon/ajax.html?svc=core/logout&params={}&sid=${sid}`);
-
-    console.log(`📦 Minería completada: ${filasSimuladas.length} puntos de datos recuperados.`);
-    
-    // Si no hay datos, inyectamos un dato falso del bus conocido para probar el flujo
-    if (filasSimuladas.length === 0) {
-        console.log("⚠️ No se encontraron datos reales. Inyectando dato de prueba para validar flujo.");
-        filasSimuladas.push({
-            c: [{t: "178"}, {t: "T. RIONEGRO"}, {t: "10:00:00"}],
-            bus_contexto: "178"
-        });
+    // 4. ESPERAR (POLLING)
+    let status = 0;
+    for (let i = 0; i < 40; i++) {
+      await new Promise(r => setTimeout(r, 1000));
+      const sRes = await axios.get(`https://hst-api.wialon.com/wialon/ajax.html?svc=report/get_report_status&params={}&sid=${sid}`);
+      status = parseInt(sRes.data.status);
+      if (status === 4) break;
     }
 
-    return filasSimuladas;
+    // 5. APLICAR Y DESCARGAR
+    const applyRes = await axios.get(`https://hst-api.wialon.com/wialon/ajax.html?svc=report/apply_report_result&params={}&sid=${sid}`);
+    const totalRows = applyRes.data.rows || 0;
+    console.log(`📊 Filas detectadas con reporte limpio: ${totalRows}`);
+
+    const filasPlanas: any[] = [];
+
+    if (totalRows > 0) {
+        const rowsParams = {
+          tableIndex: 0,
+          config: { type: "range", data: { from: 0, to: totalRows - 1, level: 2, unitInfo: 1 } }
+        };
+
+        const rowsRes = await axios.get(
+            `https://hst-api.wialon.com/wialon/ajax.html?svc=report/select_result_rows&params=${JSON.stringify(rowsParams)}&sid=${sid}`,
+            { timeout: 60000 }
+        );
+
+        // Procesar datos (Normalizar)
+        const rawData = rowsRes.data;
+        if (Array.isArray(rawData)) {
+            const procesarFila = (row: any, contextoPadre: string) => {
+                let unidadActual = contextoPadre;
+                // Nivel 0: Encabezado de Bus
+                if (row.c && row.c[0] && !row.c[1]) {
+                    unidadActual = row.c[0].t || row.c[0];
+                }
+                // Nivel Detalle: Datos (Bus, Geocerca, Hora)
+                if (row.c && row.c.length >= 3) {
+                   const bus = row.c[0].t || unidadActual; // A veces viene vacio en filas hijas
+                   const geo = row.c[1].t;
+                   const hora = row.c[2].t;
+                   
+                   if (bus && geo && hora) {
+                       filasPlanas.push({
+                           c: [{t: bus}, {t: geo}, {t: hora}],
+                           bus_contexto: bus
+                       });
+                   }
+                }
+                if (row.r) row.r.forEach((h: any) => procesarFila(h, unidadActual));
+            };
+            rawData.forEach(r => procesarFila(r, ""));
+        }
+    }
+
+    // 6. LIMPIEZA Y BORRADO DE REPORTE
+    try {
+        await axios.get(`https://hst-api.wialon.com/wialon/ajax.html?svc=report/cleanup_result&params={}&sid=${sid}`);
+        
+        // Borramos el reporte temporal para no ensuciar tu cuenta
+        if (tempReportId > 0) {
+            await axios.get(
+                `https://hst-api.wialon.com/wialon/ajax.html?svc=item/delete_item&params={"itemId":${RESOURCE_ID},"id":${tempReportId},"callMode":"delete"}&sid=${sid}`
+            );
+            console.log("🧹 Reporte temporal eliminado.");
+        }
+        
+        await axios.get(`https://hst-api.wialon.com/wialon/ajax.html?svc=core/logout&params={}&sid=${sid}`);
+    } catch (e) {}
+
+    console.log(`📦 Filas procesadas finales: ${filasPlanas.length}`);
+    return filasPlanas;
 
   } catch (e: any) {
-    if (sid) await axios.get(`https://hst-api.wialon.com/wialon/ajax.html?svc=core/logout&params={}&sid=${sid}`).catch(()=>{});
+    // Limpieza de emergencia
+    if (sid) {
+        if (tempReportId > 0) await axios.get(`https://hst-api.wialon.com/wialon/ajax.html?svc=item/delete_item&params={"itemId":${RESOURCE_ID},"id":${tempReportId},"callMode":"delete"}&sid=${sid}`).catch(()=>{});
+        await axios.get(`https://hst-api.wialon.com/wialon/ajax.html?svc=core/logout&params={}&sid=${sid}`).catch(()=>{});
+    }
     console.error("🔥 Error Wialon:", getErrorMessage(e));
     return [];
   }
