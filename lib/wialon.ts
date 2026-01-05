@@ -1,29 +1,37 @@
-// lib/wialon.ts - VERSIÓN CON DIAGNÓSTICO
+// lib/wialon.ts - VERSIÓN CON MÁS LOGS
 import axios from 'axios';
 
 export async function ejecutarInformeCosecha(desde: number, hasta: number) {
+  console.log(`🔍 WIALON ejecutarInformeCosecha: ${desde} a ${hasta}`);
+  
   const token = process.env.WIALON_TOKEN;
   
   if (!token) {
-    throw new Error("❌ FALTA WIALON_TOKEN en variables de entorno");
+    console.error("❌ ERROR: WIALON_TOKEN no definido");
+    throw new Error("WIALON_TOKEN no configurado");
   }
-
-  console.log(`🔍 WIALON: Consultando desde ${new Date(desde * 1000).toISOString()} hasta ${new Date(hasta * 1000).toISOString()}`);
+  
+  console.log("✅ Token encontrado, longitud:", token.length);
 
   try {
     // 1. LOGIN
+    console.log("🔍 Intentando login...");
     const loginRes = await axios.get(
-      `https://hst-api.wialon.com/wialon/ajax.html?svc=token/login&params={"token":"${token}"}`
+      `https://hst-api.wialon.com/wialon/ajax.html?svc=token/login&params={"token":"${token}"}`,
+      { timeout: 15000 }
     );
     
-    console.log("🔍 WIALON Login respuesta:", JSON.stringify(loginRes.data).substring(0, 200));
+    console.log("🔍 Login respuesta:", JSON.stringify(loginRes.data).substring(0, 200));
     
     const sid = loginRes.data.eid;
     if (!sid) {
-      throw new Error(`❌ No hay SID. Respuesta: ${JSON.stringify(loginRes.data)}`);
+      console.error("❌ Login falló. Respuesta completa:", loginRes.data);
+      throw new Error(`Login falló: ${JSON.stringify(loginRes.data)}`);
     }
+    
+    console.log("✅ Login exitoso. SID:", sid);
 
-    // 2. CONFIGURAR REPORTE
+    // 2. EJECUTAR REPORTE CON MÁS PARÁMETROS
     const reportParams = {
       reportResourceId: 28775158,
       reportTemplateId: 18,
@@ -32,98 +40,83 @@ export async function ejecutarInformeCosecha(desde: number, hasta: number) {
       interval: { 
         from: desde, 
         to: hasta, 
-        flags: 0x1 // Agregar flag para incluir objetos ocultos
+        flags: 0x1 // Incluir objetos ocultos
       },
-      remoteExec: 1 // Cambiar a 1 para ejecución remota
+      remoteExec: 1, // Ejecución remota
+      reportTemplate: null
     };
 
-    console.log("🔍 WIALON Ejecutando reporte con params:", JSON.stringify(reportParams));
-
-    // 3. EJECUTAR REPORTE
-    const execUrl = `https://hst-api.wialon.com/wialon/ajax.html?svc=report/exec_report&params=${JSON.stringify(reportParams)}&sid=${sid}`;
-    const execRes = await axios.get(execUrl);
+    console.log("🔍 Ejecutando reporte con params:", JSON.stringify(reportParams));
     
-    console.log("🔍 WIALON Reporte ejecutado:", JSON.stringify(execRes.data).substring(0, 200));
-
+    const execRes = await axios.get(
+      `https://hst-api.wialon.com/wialon/ajax.html?svc=report/exec_report&params=${JSON.stringify(reportParams)}&sid=${sid}`,
+      { timeout: 20000 }
+    );
+    
+    console.log("🔍 Reporte ejecutado:", JSON.stringify(execRes.data).substring(0, 300));
+    
     if (execRes.data.error) {
-      throw new Error(`❌ Error ejecutando reporte: ${execRes.data.error}`);
+      console.error("❌ Error en ejecución de reporte:", execRes.data.error);
+      throw new Error(`Error reporte: ${execRes.data.error}`);
     }
 
-    // 4. ESPERAR PARA PROCESAMIENTO
+    // 3. ESPERAR Y OBTENER DATOS
+    console.log("⏳ Esperando procesamiento del reporte...");
     await new Promise(resolve => setTimeout(resolve, 5000));
 
-    // 5. INTENTAR DIFERENTES MÉTODOS PARA OBTENER DATOS
+    // Intentar con límite mayor
+    const selectParams = {
+      tableIndex: 0,
+      config: { 
+        type: "range", 
+        data: { 
+          from: 0, 
+          to: 500, // Aumentar límite
+          level: 0, 
+          unitInfo: 1 
+        } 
+      }
+    };
     
-    // Método A: select_result_rows (el que usabas)
-    try {
-      const selectParams = {
-        tableIndex: 0,
-        config: { 
-          type: "range", 
-          data: { 
-            from: 0, 
-            to: 100, // Incrementar para ver más datos
-            level: 0, 
-            unitInfo: 1 
-          } 
-        }
-      };
-      
-      const selectUrl = `https://hst-api.wialon.com/wialon/ajax.html?svc=report/select_result_rows&params=${JSON.stringify(selectParams)}&sid=${sid}`;
-      const rowsRes = await axios.get(selectUrl);
-      
-      console.log("🔍 WIALON select_result_rows respuesta estructura:", {
-        tipo: typeof rowsRes.data,
-        esArray: Array.isArray(rowsRes.data),
-        longitud: Array.isArray(rowsRes.data) ? rowsRes.data.length : 'N/A',
-        primerElemento: rowsRes.data && Array.isArray(rowsRes.data) && rowsRes.data.length > 0 
-          ? rowsRes.data[0] 
-          : 'Vacío'
-      });
-
-      if (rowsRes.data && rowsRes.data.length > 0) {
-        // 6. LOGOUT
-        await axios.get(`https://hst-api.wialon.com/wialon/ajax.html?svc=core/logout&params={}&sid=${sid}`);
-        
-        return rowsRes.data;
-      }
-    } catch (selectError: any) {
-      console.log("⚠️ select_result_rows falló:", selectError.message);
+    console.log("🔍 Solicitando datos con select_result_rows...");
+    const rowsRes = await axios.get(
+      `https://hst-api.wialon.com/wialon/ajax.html?svc=report/select_result_rows&params=${JSON.stringify(selectParams)}&sid=${sid}`,
+      { timeout: 15000 }
+    );
+    
+    console.log("🔍 Datos recibidos. Tipo:", typeof rowsRes.data);
+    console.log("🔍 Es array?:", Array.isArray(rowsRes.data));
+    console.log("🔍 Longitud:", Array.isArray(rowsRes.data) ? rowsRes.data.length : "N/A");
+    
+    if (Array.isArray(rowsRes.data) && rowsRes.data.length > 0) {
+      console.log("🔍 Primer elemento:", JSON.stringify(rowsRes.data[0]).substring(0, 300));
     }
 
-    // Método B: get_result_rows (alternativo)
-    try {
-      const getRowsParams = {
-        tableIndex: 0,
-        indexFrom: 0,
-        indexTo: 100
-      };
-      
-      const getRowsUrl = `https://hst-api.wialon.com/wialon/ajax.html?svc=report/get_result_rows&params=${JSON.stringify(getRowsParams)}&sid=${sid}`;
-      const getRowsRes = await axios.get(getRowsUrl);
-      
-      console.log("🔍 WIALON get_result_rows respuesta:", {
-        tipo: typeof getRowsRes.data,
-        estructura: getRowsRes.data
-      });
+    // 4. LOGOUT
+    await axios.get(
+      `https://hst-api.wialon.com/wialon/ajax.html?svc=core/logout&params={}&sid=${sid}`,
+      { timeout: 5000 }
+    );
+    
+    console.log("✅ Logout exitoso");
 
-      // 6. LOGOUT
-      await axios.get(`https://hst-api.wialon.com/wialon/ajax.html?svc=core/logout&params={}&sid=${sid}`);
-      
-      // Wialon puede devolver {rows: [...]}
-      if (getRowsRes.data && getRowsRes.data.rows) {
-        return getRowsRes.data.rows;
-      }
-      
-      return getRowsRes.data || [];
-
-    } catch (getRowsError: any) {
-      console.log("⚠️ get_result_rows también falló:", getRowsError.message);
-      throw new Error(`Todos los métodos fallaron: ${getRowsError.message}`);
-    }
+    // Devolver datos o array vacío
+    return Array.isArray(rowsRes.data) ? rowsRes.data : [];
 
   } catch (error: any) {
-    console.error("🔥 ERROR CRÍTICO en wialon.ts:", error.message);
+    console.error("🔥 ERROR CRÍTICO en wialon.ts:", {
+      message: error.message,
+      url: error.config?.url,
+      status: error.response?.status,
+      data: error.response?.data
+    });
+    
+    // Si hay timeout, devolver array vacío para no bloquear el proceso
+    if (error.code === 'ECONNABORTED') {
+      console.warn("⚠️ Timeout en Wialon, devolviendo array vacío");
+      return [];
+    }
+    
     throw error;
   }
 }
