@@ -1,7 +1,7 @@
 // lib/wialon.ts
 import axios from 'axios';
 
-// Helper para manejar errores de tipado en catch
+// Helper para manejar errores de tipado en bloques catch
 const getErrorMessage = (error: unknown) => {
   if (error instanceof Error) return error.message;
   return String(error);
@@ -13,17 +13,17 @@ export async function ejecutarInformeCosecha(desde: number, hasta: number) {
   const token = process.env.WIALON_TOKEN;
   
   if (!token) {
-    throw new Error("WIALON_TOKEN no configurado");
+    throw new Error("WIALON_TOKEN no configurado en variables de entorno");
   }
 
   let sid = '';
   
   try {
     // 1. LOGIN
-    console.log("🔍 WIALON: Haciendo login...");
+    console.log("🔍 WIALON: Iniciando sesión...");
     const loginRes = await axios.get(
       `https://hst-api.wialon.com/wialon/ajax.html?svc=token/login&params={"token":"${token}"}`,
-      { timeout: 15000 } // Aumentado a 15s
+      { timeout: 15000 }
     );
     
     sid = loginRes.data.eid;
@@ -31,47 +31,49 @@ export async function ejecutarInformeCosecha(desde: number, hasta: number) {
       throw new Error(`Login falló: ${JSON.stringify(loginRes.data)}`);
     }
     
-    console.log("✅ WIALON: Login exitoso, SID:", sid);
+    console.log("✅ WIALON: Login exitoso. SID obtenido.");
 
-    // 2. CONFIGURAR ZONA HORARIA (Opcional pero recomendado para consistencia)
+    // 2. CONFIGURAR ZONA HORARIA (Colombia GMT-5 = -18000 segundos)
     try {
       await axios.get(
         `https://hst-api.wialon.com/wialon/ajax.html?svc=render/set_locale&params={"tzOffset":-18000,"language":"en","formatDate":"%Y-%m-%d %H:%M:%S"}&sid=${sid}`,
         { timeout: 5000 }
       );
     } catch (e) {
-      console.warn("⚠️ Warning setting locale:", getErrorMessage(e));
+      console.warn("⚠️ Advertencia: No se pudo configurar la zona horaria, usando la del servidor Wialon.");
     }
 
-    // 3. EJECUTAR REPORTE (Asegúrate que el ID 18 corresponda a Geocercas/Unidades)
+    // 3. EJECUTAR REPORTE (ID 18)
+    // Nota: remoteExec: 1 es crucial para reportes grandes
     const reportParams = {
       reportResourceId: 28775158, 
       reportTemplateId: 18, 
-      reportObjectId: 28775158, // Recurso o Grupo de Unidades
+      reportObjectId: 28775158, 
       reportObjectSecId: 0,
       interval: { 
         from: desde, 
         to: hasta, 
         flags: 0 
       },
-      remoteExec: 1 // Ejecución asíncrona
+      remoteExec: 1 
     };
 
-    console.log("🔍 WIALON: Iniciando ejecución remota...");
+    console.log("🔍 WIALON: Enviando orden de ejecución de reporte...");
     const execRes = await axios.get(
       `https://hst-api.wialon.com/wialon/ajax.html?svc=report/exec_report&params=${JSON.stringify(reportParams)}&sid=${sid}`,
       { timeout: 20000 }
     );
     
     if (execRes.data.error) {
-      throw new Error(`Error Wialon Exec: ${execRes.data.error}`);
+      throw new Error(`Error al ejecutar reporte: Código ${execRes.data.error}`);
     }
 
-    // 4. POLLING DE ESTADO (Esperar que termine)
+    // 4. POLLING (ESPERAR RESULTADOS)
     let status = 0;
     let intentos = 0;
-    // Aumentamos intentos a 60 (1 minuto máx) para reportes grandes
-    while (status !== 4 && intentos < 60) {
+    const maxIntentos = 60; // Esperar hasta 60 segundos
+
+    while (status !== 4 && intentos < maxIntentos) {
       await new Promise(r => setTimeout(r, 1000));
       intentos++;
       
@@ -80,78 +82,94 @@ export async function ejecutarInformeCosecha(desde: number, hasta: number) {
           `https://hst-api.wialon.com/wialon/ajax.html?svc=report/get_report_status&params={}&sid=${sid}`
         );
         status = parseInt(statusRes.data.status);
-        // console.log(`⏳ Estado reporte: ${status} (Intento ${intentos})`);
-      } catch (err: unknown) {
-        console.warn("⚠️ Error polling status:", getErrorMessage(err));
+      } catch (err) {
+        console.warn("⚠️ Error verificando estado, reintentando...");
       }
     }
 
-    if (status !== 4) throw new Error("Timeout esperando reporte de Wialon");
+    if (status !== 4) throw new Error("Timeout: El reporte de Wialon tardó demasiado en generarse.");
 
-    // 5. APLICAR RESULTADOS (Traer tablas al contexto actual)
+    // 5. APLICAR RESULTADOS
     const applyRes = await axios.get(
       `https://hst-api.wialon.com/wialon/ajax.html?svc=report/apply_report_result&params={}&sid=${sid}`
     );
 
-    // Revisar cuántas filas generó el reporte realmente
     const totalRows = applyRes.data.rows || 0;
-    console.log(`📊 WIALON: Reporte listo. Filas totales detectadas: ${totalRows}`);
+    console.log(`📊 WIALON: Reporte listo. Filas detectadas en el servidor: ${totalRows}`);
 
     if (totalRows === 0) {
-      // Limpieza rápida y retorno vacío
-      await axios.get(`https://hst-api.wialon.com/wialon/ajax.html?svc=report/cleanup_result&params={}&sid=${sid}`);
-      await axios.get(`https://hst-api.wialon.com/wialon/ajax.html?svc=core/logout&params={}&sid=${sid}`);
+      await limpiarSesion(sid);
       return [];
     }
 
     // 6. DESCARGAR FILAS
-    // Pedimos todas las filas disponibles (o un límite seguro, ej. 5000)
     const rowsParams = {
       tableIndex: 0,
       indexFrom: 0,
-      indexTo: totalRows // Pedir exactamente las que hay
+      indexTo: totalRows 
     };
 
     const rowsRes = await axios.get(
       `https://hst-api.wialon.com/wialon/ajax.html?svc=report/get_result_rows&params=${JSON.stringify(rowsParams)}&sid=${sid}`,
-      { timeout: 30000 } // Timeout generoso para descarga
+      { timeout: 30000 }
     );
 
-    // 7. LIMPIEZA Y LOGOUT
-    try {
-      await axios.get(`https://hst-api.wialon.com/wialon/ajax.html?svc=report/cleanup_result&params={}&sid=${sid}`);
-      await axios.get(`https://hst-api.wialon.com/wialon/ajax.html?svc=core/logout&params={}&sid=${sid}`);
-    } catch (e) { /* ignorar error en limpieza */ }
+    // 7. LIMPIEZA
+    await limpiarSesion(sid);
 
-    // Procesar respuesta
-    let filas = [];
+    // 8. PROCESAMIENTO Y NORMALIZACIÓN DE DATOS
+    let filasRaw = [];
     if (Array.isArray(rowsRes.data)) {
-      filas = rowsRes.data;
+      filasRaw = rowsRes.data;
     } else if (rowsRes.data && Array.isArray(rowsRes.data.rows)) {
-      filas = rowsRes.data.rows; // Algunas versiones devuelven objeto con propiedad rows
-    } else {
-      console.error("❌ Estructura desconocida de filas:", JSON.stringify(rowsRes.data).substring(0, 200));
+      filasRaw = rowsRes.data.rows;
     }
 
-    // Filtrado básico para quitar filas vacías o de agrupación
-    return filas.filter((r: any) => r.c && r.c.length > 0);
+    console.log(`✅ WIALON: Filas crudas descargadas: ${filasRaw.length}`);
+
+    // NORMALIZADOR: Convierte todo a una estructura estándar { c: [{t:val}, {t:val}...] }
+    // Esto arregla el problema de "en_wialon: 0" por formato incorrecto
+    const filasNormalizadas = filasRaw
+      .filter((row: any) => {
+        // Filtrar filas vacías o de agrupación que no tengan datos útiles
+        if (row.c && Array.isArray(row.c)) return row.c.length >= 3;
+        if (Array.isArray(row)) return row.length >= 3;
+        return false;
+      })
+      .map((row: any) => {
+        // Si ya tiene la estructura 'c', la dejamos pasar
+        if (row.c && Array.isArray(row.c)) return row;
+        
+        // Si es un array plano, lo envolvemos para que parezca la estructura estándar
+        if (Array.isArray(row)) {
+          return { c: row.map((val: any) => ({ t: val })) };
+        }
+        return null;
+      })
+      .filter((row: any) => row !== null);
+
+    console.log(`✅ WIALON: Filas normalizadas y listas para auditoría: ${filasNormalizadas.length}`);
+    return filasNormalizadas;
 
   } catch (error: any) {
-    // Manejo robusto de errores y limpieza de sesión si existe
-    if (sid) {
-      try {
-        await axios.get(`https://hst-api.wialon.com/wialon/ajax.html?svc=core/logout&params={}&sid=${sid}`);
-      } catch (e) {}
-    }
+    if (sid) await limpiarSesion(sid).catch(() => {});
 
-    // Si es timeout de Axios
     if (error.code === 'ECONNABORTED') {
       console.error("🔥 WIALON TIMEOUT: La petición tardó demasiado.");
-      return []; // Retornar vacío para no romper el flujo batch
+      return []; 
     }
 
-    console.error("🔥 ERROR WIALON LIB:", error.message);
-    // En producción, tal vez quieras lanzar el error, pero para batch es mejor loguear y seguir
+    console.error("🔥 ERROR WIALON LIB:", getErrorMessage(error));
     return []; 
+  }
+}
+
+// Función auxiliar para cerrar sesión y limpiar
+async function limpiarSesion(sid: string) {
+  try {
+    await axios.get(`https://hst-api.wialon.com/wialon/ajax.html?svc=report/cleanup_result&params={}&sid=${sid}`);
+    await axios.get(`https://hst-api.wialon.com/wialon/ajax.html?svc=core/logout&params={}&sid=${sid}`);
+  } catch (e) {
+    // Silencio
   }
 }
