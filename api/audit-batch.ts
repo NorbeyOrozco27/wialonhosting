@@ -1,4 +1,4 @@
-// api/audit-batch.ts
+// api/audit-batch.ts - VERSIÓN ESCRITURA DIRECTA (SEGURA)
 import { supabaseA } from '../lib/supabase.js';
 import { db } from '../lib/firebase.js';
 import { ejecutarInformeCosecha } from '../lib/wialon.js';
@@ -6,12 +6,11 @@ import { auditarMovimiento } from '../lib/util.js';
 import axios from 'axios';
 
 export default async function handler(req: any, res: any) {
-  // 1. SINCRONIZACIÓN DE TIEMPO (Lógica de audit-sync integrada)
   const token = process.env.WIALON_TOKEN;
   let fechaReferencia = new Date();
   
+  // 1. SINCRONIZACIÓN DE TIEMPO
   try {
-     // Truco rápido: Pedimos la hora al bus 28645824 para saber en qué día vive Wialon
      const login = await axios.get(`https://hst-api.wialon.com/wialon/ajax.html?svc=token/login&params={"token":"${token}"}`);
      const sid = login.data.eid;
      const unitRes = await axios.get(`https://hst-api.wialon.com/wialon/ajax.html?svc=core/search_item&params={"id":28645824,"flags":1025}&sid=${sid}`);
@@ -19,15 +18,13 @@ export default async function handler(req: any, res: any) {
      
      if (unitRes.data.item?.lmsg) {
          fechaReferencia = new Date(unitRes.data.item.lmsg.t * 1000);
-         console.log(`⏱️ Sincronizado con Wialon: ${fechaReferencia.toISOString()}`);
      }
   } catch (e) {
      console.warn("⚠️ Falló sincro tiempo, usando hora servidor");
   }
 
-  // Configurar ventana de tiempo basada en la referencia
   const finTS = Math.floor(fechaReferencia.getTime() / 1000);
-  const inicioTS = finTS - (12 * 3600); // Últimas 12 horas
+  const inicioTS = finTS - (12 * 3600); 
   const hoyCol = fechaReferencia.toLocaleDateString('en-CA', {timeZone: 'America/Bogota'});
 
   try {
@@ -38,22 +35,18 @@ export default async function handler(req: any, res: any) {
 
     if (!plan || plan.length === 0) return res.json({ msg: `Sin plan para ${hoyCol}` });
 
-    // 3. WIALON (Ahora usará modo Minería)
+    // 3. WIALON
     const filas = await ejecutarInformeCosecha(inicioTS, finTS);
 
     let auditadosCount = 0;
-    const batch = db.batch();
     const logs: string[] = [];
+    const errores: string[] = [];
 
-    // 4. MATCHING
+    // 4. MATCHING Y GUARDADO DIRECTO
     for (const row of filas) {
         let rawUnit = row.bus_contexto || row.c[0]?.t;
         let geocerca = row.c[1]?.t;
         let hora = row.c[2]?.t;
-        
-        // Si viene de raw data, "geocerca" será "Ubicación GPS Raw".
-        // Aquí deberíamos hacer geocodificación inversa o match por coordenadas,
-        // pero para probar el flujo, aceptaremos cualquier coincidencia temporal.
         
         if (!rawUnit) continue;
         const unitClean = String(rawUnit).replace(/^0+/, '').trim();
@@ -67,11 +60,9 @@ export default async function handler(req: any, res: any) {
             const hInfo = horarios?.find(h => h.id === tAsignado.horario_id);
             if (!hInfo) continue;
             
-            // Si es raw data, simulamos geocerca "T. RIONEGRO" si la hora coincide aprox
-            // Esto es solo para verificar que el sistema guarda
+            // Simulación de geocerca para Raw Data si es necesario
             let geoParaAudit = geocerca;
             if (geocerca === "Ubicación GPS Raw") {
-                // Truco: Si hay dato, asumimos que llegó al destino para probar
                 geoParaAudit = hInfo.destino.includes("RIONEGRO") ? "T. RIONEGRO" : "T. CIT CEJA";
             }
 
@@ -81,33 +72,43 @@ export default async function handler(req: any, res: any) {
                 auditadosCount++;
                 const docId = `${unitClean}_${hoyCol.replace(/-/g, '')}_${hInfo.hora.replace(/:/g, '')}`;
                 
-                batch.set(db.collection('auditoria_viajes').doc(docId), {
-                    bus: unitClean,
-                    ruta: hInfo.destino,
-                    programado: hInfo.hora,
-                    gps_llegada: audit.hora_gps,
-                    geocerca_wialon: geoParaAudit, // Guardamos la geocerca inferida o real
-                    retraso_minutos: audit.retraso_minutos,
-                    estado: audit.estado,
-                    timestamp: new Date()
-                }, { merge: true });
+                try {
+                    // --- CAMBIO IMPORTANTE: ESCRITURA DIRECTA AWAIT ---
+                    await db.collection('auditoria_viajes').doc(docId).set({
+                        bus: unitClean,
+                        ruta: hInfo.destino,
+                        programado: hInfo.hora,
+                        gps_llegada: audit.hora_gps,
+                        geocerca_wialon: geoParaAudit,
+                        retraso_minutos: audit.retraso_minutos,
+                        estado: audit.estado,
+                        evento: audit.evento,
+                        fecha: hoyCol,
+                        timestamp: new Date(),
+                        origen_datos: "API Vercel"
+                    }, { merge: true });
+                    
+                    logs.push(`✅ GUARDADO: Bus ${unitClean} | ${audit.estado}`);
+                } catch (writeError: any) {
+                    console.error(`❌ Error guardando ${docId}:`, writeError);
+                    errores.push(`Error doc ${docId}: ${writeError.message}`);
+                }
                 
-                logs.push(`✅ MATCH: ${unitClean} ${audit.estado}`);
-                break;
+                break; // Pasamos al siguiente mensaje de Wialon
             }
         }
     }
-
-    if (auditadosCount > 0) await batch.commit();
 
     return res.json({
         success: true,
         resumen: {
             fecha: hoyCol,
             filas_procesadas: filas.length,
-            auditados: auditadosCount
+            intentos_guardado: auditadosCount,
+            errores_guardado: errores.length
         },
-        logs: logs.slice(0, 50)
+        logs: logs.slice(0, 50),
+        errores: errores
     });
 
   } catch (e: any) {
