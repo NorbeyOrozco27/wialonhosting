@@ -48,7 +48,7 @@ export function auditarMovimiento(
       if (checkpointObjetivo.lat) {
           distanciaMetros = calcularDistancia(lat, lon, checkpointObjetivo.lat, checkpointObjetivo.lon);
           // Si está lejos (> 800m), ignoramos
-          if (distanciaMetros > 800) return null;
+          if (distanciaMetros > 3000) return null;
       }
   } else {
       // MODO 2: WEBHOOK (Confiamos en el nombre de la geocerca)
