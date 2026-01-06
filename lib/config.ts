@@ -1,34 +1,40 @@
-// lib/config.ts
+// lib/config.ts - CONFIGURACIÓN CALIBRADA (GURTAM MAPS)
 export const RUTAS_MAESTRAS: Record<string, any> = {
   "NORTE": { 
     checkpoints: [
-      { nombre: "T. CIT CEJA", tti: 0, lat: 6.0336, lon: -75.4328 }, // Coordenadas aprox La Ceja
-      { nombre: "T. NORTE", tti: 110, lat: 6.2758, lon: -75.5705 }   // Terminal Norte Medellín
+      { nombre: "T. CIT CEJA", tti: 0, lat: 6.031375, lon: -75.428140 }, // Origen
+      { nombre: "T. NORTE", tti: 110, lat: 6.278344, lon: -75.570674 }   // Destino
     ] 
   },
   "SUR": { 
     checkpoints: [
-      { nombre: "T. CIT CEJA", tti: 0, lat: 6.0336, lon: -75.4328 },
-      { nombre: "T. SUR", tti: 110, lat: 6.2185, lon: -75.5838 }     // Terminal Sur Medellín
+      { nombre: "T. CIT CEJA", tti: 0, lat: 6.031375, lon: -75.428140 },
+      { nombre: "T. SUR", tti: 110, lat: 6.216175, lon: -75.587963 }
     ] 
   },
   "RIONEGRO": { 
     checkpoints: [
-      { nombre: "T. CIT CEJA", tti: 0, lat: 6.0336, lon: -75.4328 },
-      { nombre: "T. RIONEGRO", tti: 50, lat: 6.1517, lon: -75.3789 } // Terminal Rionegro (Aprox)
+      { nombre: "T. CIT CEJA", tti: 0, lat: 6.031375, lon: -75.428140 },
+      { nombre: "T. RIONEGRO", tti: 50, lat: 6.151535, lon: -75.373023 }
     ] 
   },
   "UNION": { 
     checkpoints: [
-      { nombre: "T. CIT CEJA", tti: 0, lat: 6.0336, lon: -75.4328 },
-      { nombre: "T. LA UNION 2", tti: 40, lat: 5.9744, lon: -75.3622 } // La Unión
+      { nombre: "T. CIT CEJA", tti: 0, lat: 6.031375, lon: -75.428140 },
+      { nombre: "T. LA UNION 2", tti: 40, lat: 5.972245, lon: -75.358896 }
     ] 
+  },
+  "EXPO": { // Agregué EXPO por si acaso tienes esa ruta en Supabase
+    checkpoints: [
+      { nombre: "T. CIT CEJA", tti: 0, lat: 6.031375, lon: -75.428140 },
+      { nombre: "T. EXPO", tti: 90, lat: 6.237823, lon: -75.573333 }
+    ]
   }
 };
 
-// Función matemática para calcular distancia entre dos puntos (Fórmula Haversine)
+// Función matemática de distancia (Haversine)
 export function calcularDistancia(lat1: number, lon1: number, lat2: number, lon2: number): number {
-  const R = 6371e3; // Radio de la tierra en metros
+  const R = 6371e3; // Radio tierra (metros)
   const φ1 = lat1 * Math.PI/180;
   const φ2 = lat2 * Math.PI/180;
   const Δφ = (lat2-lat1) * Math.PI/180;
@@ -39,15 +45,17 @@ export function calcularDistancia(lat1: number, lon1: number, lat2: number, lon2
             Math.sin(Δλ/2) * Math.sin(Δλ/2);
   const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
 
-  return R * c; // Distancia en metros
+  return R * c; 
 }
 
 export function identificarRuta(destinoDB: string) {
   if (!destinoDB) return null;
   const d = destinoDB.toUpperCase();
+  // El orden importa: busca coincidencias específicas primero
   if (d.includes("NORTE")) return "NORTE";
   if (d.includes("SUR"))   return "SUR";
   if (d.includes("UNION")) return "UNION";
   if (d.includes("RIONEGRO")) return "RIONEGRO";
+  if (d.includes("EXPO")) return "EXPO";
   return null;
 }

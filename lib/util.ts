@@ -45,7 +45,7 @@ export function auditarMovimiento(
       if (checkpointObjetivo.lat) {
           distanciaMetros = calcularDistancia(lat, lon, checkpointObjetivo.lat, checkpointObjetivo.lon);
           // Tolerancia amplia para pruebas: 5km (5000 metros)
-          if (distanciaMetros > 5000) return null;
+          if (distanciaMetros > 1000) return null;
       }
   } else {
       // MODO 2: WEBHOOK (Tenemos nombre de geocerca)
