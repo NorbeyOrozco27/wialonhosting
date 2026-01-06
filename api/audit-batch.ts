@@ -1,135 +1,189 @@
-// api/audit-batch.ts - VERSIÓN CORREGIDA Y COMPLETA
+// api/audit-batch.ts
 import { supabaseA } from '../lib/supabase.js';
 import { db } from '../lib/firebase.js';
-import { ejecutarInformeCosecha } from '../lib/wialon.js';
-import { auditarMovimiento } from '../lib/util.js';
-import { calcularDistancia, RUTAS_MAESTRAS, identificarRuta } from '../lib/config.js';
+import { obtenerMensajesRaw } from '../lib/wialon.js';
+import { RUTAS_MAESTRAS, identificarRuta, calcularDistancia } from '../lib/config.js';
 import axios from 'axios';
 
 export default async function handler(req: any, res: any) {
-  const token = process.env.WIALON_TOKEN;
-  let fechaReferencia = new Date();
+  // 1. DEFINIR FECHA (HOY COLOMBIA)
+  // Ajuste manual: Si estás probando datos históricos de Enero 6, usa esa fecha.
+  // Para producción automática: new Date()
+  const fechaAnalisis = new Date(); 
+  // const fechaAnalisis = new Date("2026-01-05T12:00:00-05:00"); // Descomentar para forzar fecha
+
+  const hoyCol = fechaAnalisis.toLocaleDateString('en-CA', {timeZone: 'America/Bogota'});
   
-  // 1. SINCRONIZACIÓN DE TIEMPO AUTOMÁTICA
-  try {
-     const login = await axios.get(`https://hst-api.wialon.com/wialon/ajax.html?svc=token/login&params={"token":"${token}"}`);
-     const sid = login.data.eid;
-     const unitRes = await axios.get(`https://hst-api.wialon.com/wialon/ajax.html?svc=core/search_item&params={"id":28645824,"flags":1025}&sid=${sid}`);
-     await axios.get(`https://hst-api.wialon.com/wialon/ajax.html?svc=core/logout&params={}&sid=${sid}`);
-     
-     if (unitRes.data.item?.lmsg) {
-         fechaReferencia = new Date(unitRes.data.item.lmsg.t * 1000);
-     }
-  } catch (e) {
-     console.warn("⚠️ Falló sincro tiempo, usando hora servidor");
-  }
-
-  const finTS = Math.floor(fechaReferencia.getTime() / 1000);
-  const inicioTS = finTS - (12 * 3600); // 12 horas atrás
-  const hoyCol = fechaReferencia.toLocaleDateString('en-CA', {timeZone: 'America/Bogota'});
+  // Timestamps UNIX para Wialon
+  const finTS = Math.floor(fechaAnalisis.getTime() / 1000);
+  const inicioTS = finTS - (24 * 3600); // Últimas 24h
 
   try {
-    // 2. OBTENER DATOS DE SUPABASE
+    // 2. OBTENER PLAN SUPABASE
     const { data: plan } = await supabaseA.from('operacion_diaria').select('vehiculo_id, horario_id').eq('fecha', hoyCol);
     const { data: vehiculos } = await supabaseA.from('Vehículos').select('id, numero_interno');
     const { data: horarios } = await supabaseA.from('Horarios').select('id, hora, destino');
 
     if (!plan || plan.length === 0) return res.json({ msg: `Sin plan para ${hoyCol}` });
 
-    // 3. OBTENER DATOS DE WIALON (MINERÍA)
-    const filas = await ejecutarInformeCosecha(inicioTS, finTS);
+    // 3. OBTENER IDS DE WIALON
+    // Necesitamos mapear numero_interno (ej: "143") a ID de Wialon (ej: 28865342)
+    // Para no hacer 600 peticiones, descargamos todos los buses del grupo TRANSUNIDOS
+    // y hacemos el match en memoria.
+    
+    const token = process.env.WIALON_TOKEN;
+    const login = await axios.get(`https://hst-api.wialon.com/wialon/ajax.html?svc=token/login&params={"token":"${token}"}`);
+    const sid = login.data.eid;
+    
+    // Buscar todos los buses del grupo
+    const groupRes = await axios.get(`https://hst-api.wialon.com/wialon/ajax.html?svc=core/search_item&params={"id":28865342,"flags":1}&sid=${sid}`);
+    const wialonUnitIds = groupRes.data.item?.u || [];
+    
+    // Obtener nombres de esos buses para saber cuál es cual
+    // (Esto es pesado, pero necesario una vez. En producción se cachea).
+    // Para hacerlo rápido ahora: Vamos a bajar datos de los buses que están en el PLAN.
+    
+    // Mapeo manual rápido: Supabase ID -> Wialon ID
+    // Como no tenemos el ID de Wialon en Supabase, tenemos que buscarlo.
+    // ESTRATEGIA OPTIMIZADA: Buscar en Wialon las unidades que coincidan con los números del plan.
+    
+    const busesEnPlan = [...new Set(plan.map(p => {
+        const v = vehiculos?.find(v => v.id === p.vehiculo_id);
+        return v ? v.numero_interno : null;
+    }))].filter(x => x);
 
-    let auditadosCount = 0;
+    // Buscamos los IDs de Wialon para estos números
+    const searchSpec = {
+        itemsType: "avl_unit",
+        propName: "sys_name",
+        propValueMask: "*", // Traemos todos y filtramos en JS para asegurar
+        sortType: "sys_name"
+    };
+    const searchRes = await axios.get(`https://hst-api.wialon.com/wialon/ajax.html?svc=core/search_items&params={"spec":${JSON.stringify(searchSpec)},"force":1,"flags":1,"from":0,"to":5000}&sid=${sid}`);
+    
+    const wialonUnitsMap: Record<string, number> = {}; // "143" -> 234523
+    if (searchRes.data.items) {
+        searchRes.data.items.forEach((u: any) => {
+             // Limpiar nombre: "0143" -> "143"
+             const cleanName = u.nm.replace(/^0+/, '').trim();
+             wialonUnitsMap[cleanName] = u.id;
+        });
+    }
+    
+    await axios.get(`https://hst-api.wialon.com/wialon/ajax.html?svc=core/logout&params={}&sid=${sid}`);
+
+    // 4. DESCARGAR TRAZAS GPS
+    const idsParaConsultar = busesEnPlan.map(num => wialonUnitsMap[String(num)]).filter(x => x);
+    console.log(`🚌 Consultando GPS para ${idsParaConsultar.length} buses programados hoy.`);
+
+    const trazasGPS = await obtenerMensajesRaw(idsParaConsultar, inicioTS, finTS);
+
+    // 5. EL GRAN CRUCE (AUDITORÍA)
+    let auditados = 0;
+    const batch = db.batch();
     const logs: string[] = [];
-    const errores: string[] = [];
 
-    // 4. PROCESAMIENTO
-    for (const row of filas) {
-        let rawUnit = row.bus_contexto || row.c[0]?.t;
-        let hora = row.c[2]?.t;
-        let lat = row.lat; 
-        let lon = row.lon;
+    for (const turno of plan) {
+        const vInfo = vehiculos?.find(v => v.id === turno.vehiculo_id);
+        const hInfo = horarios?.find(h => h.id === turno.horario_id);
         
-        if (!rawUnit || !lat || !lon) continue;
-
-        const unitClean = String(rawUnit).replace(/^0+/, '').trim();
+        if (!vInfo || !hInfo) continue;
         
-        // Buscar vehículo
-        const vInfo = vehiculos?.find(v => String(v.numero_interno).trim() === unitClean);
-        if (!vInfo) continue;
+        const numBus = String(vInfo.numero_interno);
+        const wialonID = wialonUnitsMap[numBus];
+        
+        if (!wialonID) {
+            // logs.push(`⚠️ Bus ${numBus} no encontrado en Wialon`);
+            continue;
+        }
 
-        // Buscar turnos
-        const turnosBus = plan.filter(p => p.vehiculo_id === vInfo.id);
+        const traza = trazasGPS.find(t => t.unitId === wialonID);
+        if (!traza || traza.messages.length === 0) continue;
 
-        for (const tAsignado of turnosBus) {
-            const hInfo = horarios?.find(h => h.id === tAsignado.horario_id);
-            if (!hInfo) continue;
+        // DATOS DEL TURNO
+        const categoria = identificarRuta(hInfo.destino);
+        if (!categoria) continue;
 
-            const categoria = identificarRuta(hInfo.destino);
-            if (categoria) {
-                const config = RUTAS_MAESTRAS[categoria];
-                const cp = config.checkpoints[config.checkpoints.length - 1]; // Destino final
-                
-                // Calcular distancia real
-                const dist = calcularDistancia(lat, lon, cp.lat, cp.lon);
-                
-                // 5. VERIFICACIÓN CON RAYOS X (Logs detallados)
-                if (dist < 5000) { // Si está a menos de 5km
-                    
-                    // LOG IMPORTANTE: El bus está cerca
-                    logs.push(`🔍 CERCA: Bus ${unitClean} a ${Math.round(dist)}m de ${cp.nombre}. Plan: ${hInfo.hora} | GPS: ${hora}`);
+        const config = RUTAS_MAESTRAS[categoria];
+        // Auditamos LLEGADA al destino (último checkpoint)
+        const cp = config.checkpoints[config.checkpoints.length - 1]; 
 
-                    // Intentar auditar (verificar tiempos)
-                    const audit = auditarMovimiento(hInfo.destino, hInfo.hora, lat, lon, hora);
-                    
-                    if (!audit) {
-                        // LOG IMPORTANTE: Por qué falló el tiempo
-                        logs.push(`⚠️ DESCARTADO: ${unitClean} (Cerca) - Diferencia de hora muy grande.`);
-                    } else {
-                        // ÉXITO
-                        auditadosCount++;
-                        const docId = `${unitClean}_${hoyCol.replace(/-/g, '')}_${hInfo.hora.replace(/:/g, '')}`;
-                        
-                        try {
-                            await db.collection('auditoria_viajes').doc(docId).set({
-                                bus: unitClean,
-                                ruta: hInfo.destino,
-                                programado: hInfo.hora,
-                                gps_llegada: audit.hora_gps,
-                                geocerca_detectada: audit.punto,
-                                distancia_metros: audit.distancia_punto,
-                                retraso_minutos: audit.retraso_minutos,
-                                estado: audit.estado,
-                                evento: audit.evento,
-                                fecha: hoyCol,
-                                timestamp: new Date(),
-                                origen_datos: "API Vercel"
-                            }, { merge: true });
-                            
-                            logs.push(`✅ GUARDADO: ${unitClean} | ${audit.estado} | ${audit.retraso_minutos}min`);
-                        } catch (writeError: any) {
-                            errores.push(`Error Firebase: ${writeError.message}`);
-                        }
-                        
-                        break; // Ya encontramos el match para este punto GPS
-                    }
+        // Convertir hora programada a timestamp para comparar
+        const [hP, mP] = hInfo.hora.split(':').map(Number);
+        // Asumimos que la fecha es hoyCol
+        // Ojo: Ajustar a zona horaria correcta
+        const fechaTurno = new Date(fechaAnalisis); // Clona hoy
+        // Ajustamos la hora del objeto fechaTurno a la del horario
+        // Esto es truco porque 'hora' es string. Mejor comparación simple en minutos.
+        const minutosProgramadosDia = hP * 60 + mP;
+
+        // BUSCAR EN LA TRAZA: ¿Pasó cerca del destino a una hora razonable?
+        let mejorMatch = null;
+        let menorDistancia = 999999;
+
+        for (const msg of traza.messages) {
+            if (!msg.pos) continue;
+            
+            // Hora del mensaje GPS (UTC -> Colombia -5)
+            const fechaGPS = new Date(msg.t * 1000);
+            const horasGPSCol = fechaGPS.getUTCHours() - 5; 
+            const horaFinalGPS = horasGPSCol < 0 ? horasGPSCol + 24 : horasGPSCol;
+            const minutosGPSDia = horaFinalGPS * 60 + fechaGPS.getUTCMinutes();
+
+            // Solo miramos puntos dentro de una ventana de tiempo (ej: +/- 2 horas del turno)
+            if (Math.abs(minutosGPSDia - minutosProgramadosDia) > 120) continue;
+
+            const dist = calcularDistancia(msg.pos.y, msg.pos.x, cp.lat, cp.lon);
+            
+            // Si está dentro del radio de la terminal (ej: 800m)
+            if (dist < 800) {
+                // Nos quedamos con el punto más cercano o el primero que entró
+                if (dist < menorDistancia) {
+                    menorDistancia = dist;
+                    mejorMatch = {
+                        hora_real: `${horaFinalGPS.toString().padStart(2,'0')}:${fechaGPS.getUTCMinutes().toString().padStart(2,'0')}`,
+                        diferencia: minutosGPSDia - minutosProgramadosDia,
+                        distancia: Math.round(dist)
+                    };
                 }
             }
+        }
+
+        if (mejorMatch) {
+            auditados++;
+            const estado = mejorMatch.diferencia > 10 ? "RETRASADO" : (mejorMatch.diferencia < -10 ? "ADELANTADO" : "A TIEMPO");
+            
+            const docId = `${numBus}_${hoyCol.replace(/-/g, '')}_${hInfo.hora.replace(/:/g, '')}`;
+            
+            // Escritura directa por seguridad
+            await db.collection('auditoria_viajes').doc(docId).set({
+                bus: numBus,
+                ruta: hInfo.destino,
+                programado: hInfo.hora,
+                gps_llegada: mejorMatch.hora_real,
+                geocerca_detectada: cp.nombre,
+                distancia_metros: mejorMatch.distancia,
+                retraso_minutos: mejorMatch.diferencia,
+                estado: estado,
+                fecha: hoyCol,
+                timestamp: new Date(),
+                origen: "RAW_GPS"
+            }, { merge: true });
+
+            logs.push(`✅ ${numBus} -> ${cp.nombre}: Prog ${hInfo.hora}, Real ${mejorMatch.hora_real} (${estado})`);
         }
     }
 
     return res.json({
         success: true,
-        resumen: {
-            fecha: hoyCol,
-            filas_procesadas: filas.length,
-            auditados: auditadosCount
-        },
-        logs: logs.slice(0, 100), // Mostramos hasta 100 logs para ver bien
-        errores: errores
+        fecha: hoyCol,
+        buses_con_plan: busesEnPlan.length,
+        buses_con_gps: trazasGPS.length,
+        auditorias_generadas: auditados,
+        logs: logs
     });
 
   } catch (e: any) {
-    return res.json({ error: e.message });
+    return res.status(500).json({ error: e.message, stack: e.stack });
   }
 }

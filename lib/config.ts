@@ -1,5 +1,6 @@
-// lib/config.ts - CONFIGURACIÓN CALIBRADA (GURTAM MAPS)
+// lib/config.ts
 export const RUTAS_MAESTRAS: Record<string, any> = {
+  // Coordenadas exactas que me pasaste
   "NORTE": { 
     checkpoints: [
       { nombre: "T. CIT CEJA", tti: 0, lat: 6.031375, lon: -75.428140 },
@@ -28,13 +29,14 @@ export const RUTAS_MAESTRAS: Record<string, any> = {
     checkpoints: [
       { nombre: "T. CIT CEJA", tti: 0, lat: 6.031375, lon: -75.428140 },
       { nombre: "T. EXPO", tti: 90, lat: 6.237823, lon: -75.573333 }
-    ]
+    ] 
   }
 };
 
-// Función matemática de distancia (Haversine)
+// Fórmula matemática de distancia
 export function calcularDistancia(lat1: number, lon1: number, lat2: number, lon2: number): number {
-  const R = 6371e3; // Radio tierra (metros)
+  if (!lat1 || !lon1 || !lat2 || !lon2) return 999999;
+  const R = 6371e3; 
   const φ1 = lat1 * Math.PI/180;
   const φ2 = lat2 * Math.PI/180;
   const Δφ = (lat2-lat1) * Math.PI/180;
@@ -44,20 +46,16 @@ export function calcularDistancia(lat1: number, lon1: number, lat2: number, lon2
             Math.cos(φ1) * Math.cos(φ2) *
             Math.sin(Δλ/2) * Math.sin(Δλ/2);
   const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
-
   return R * c; 
 }
 
 export function identificarRuta(destinoDB: string) {
   if (!destinoDB) return null;
   const d = destinoDB.toUpperCase();
-  
-  // Lógica mejorada para detectar rutas
   if (d.includes("NORTE")) return "NORTE";
   if (d.includes("SUR"))   return "SUR";
-  if (d.includes("UNION") || d.includes("UNIÓN")) return "UNION";
-  if (d.includes("RIONEGRO") || d.includes("RIO")) return "RIONEGRO";
+  if (d.includes("UNION")) return "UNION";
+  if (d.includes("RIONEGRO")) return "RIONEGRO";
   if (d.includes("EXPO")) return "EXPO";
-  
   return null;
 }
