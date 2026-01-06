@@ -1,66 +1,95 @@
-// api/check-history.ts
-import axios from 'axios';
+// api/webhook.ts - VERSIÓN CORREGIDA PARA UTIL.TS ACTUALIZADO
+import { supabaseA } from '../lib/supabase.js';
+import { db } from '../lib/firebase.js';
+import { auditarMovimiento, ResultadoAuditoria } from '../lib/util.js';
 
 export default async function handler(req: any, res: any) {
-  const token = process.env.WIALON_TOKEN;
-  if (!token) return res.status(500).json({ error: "Falta token" });
+  if (req.method !== 'POST') return res.status(405).send('Only POST');
+
+  const { unitId, geofenceName, eventTime } = req.body;
+  
+  // Soporte para query params (pruebas) o body (webhook real)
+  const unitVal = unitId || req.query.unit;
+  const geocercaWialon = geofenceName || req.query.geofence;
+  const horaGps = eventTime || req.query.time;
+
+  if (!unitVal || !geocercaWialon || !horaGps) {
+    return res.status(400).json({ error: 'Faltan datos (unitId, geofenceName, eventTime)' });
+  }
+
+  const hoyCol = new Date().toLocaleDateString('en-CA', {timeZone: 'America/Bogota'});
+  const unitClean = String(unitVal).replace(/^0+/, '');
 
   try {
-    // 1. LOGIN
-    const login = await axios.get(`https://hst-api.wialon.com/wialon/ajax.html?svc=token/login&params={"token":"${token}"}`);
-    const sid = login.data.eid;
+    // 1. Buscar vehículo
+    const { data: vehiculos } = await supabaseA.from('Vehículos')
+      .select('id')
+      .eq('numero_interno', unitClean)
+      .single();
 
-    // 2. OBTENER BUS REFERENCIA (28645824)
-    const UNIT_ID = 28645824; 
-    const unitRes = await axios.get(
-      `https://hst-api.wialon.com/wialon/ajax.html?svc=core/search_item&params={"id":${UNIT_ID},"flags":1025}&sid=${sid}`
-    );
-    
-    const item = unitRes.data.item;
-    if (!item) return res.json({ error: "Bus no encontrado" });
+    if (!vehiculos) return res.json({ msg: "Bus no encontrado en BD" });
 
-    const ultimoMensaje = item.lmsg ? item.lmsg.t : 0;
-    const horaHumana = new Date(ultimoMensaje * 1000).toLocaleString('es-CO', {timeZone: 'America/Bogota'});
+    // 2. Buscar turnos de hoy
+    const { data: turnos } = await supabaseA.from('operacion_diaria')
+      .select('horario_id')
+      .eq('fecha', hoyCol)
+      .eq('vehiculo_id', vehiculos.id);
 
-    // 3. PEDIR MENSAJES CRUDOS (Raw Messages)
-    // Pedimos las 12 horas ANTERIORES al último mensaje
-    const to = ultimoMensaje;
-    const from = ultimoMensaje - (12 * 3600);
+    if (!turnos || turnos.length === 0) return res.json({ msg: "Sin turnos hoy" });
 
-    const msgParams = {
-        itemId: UNIT_ID,
-        timeFrom: from,
-        timeTo: to,
-        flags: 0, // 0 = mensajes de datos GPS
-        flagsMask: 0xFF00,
-        loadCount: 50 // Traer solo los primeros 50 para verificar
-    };
+    // 3. Buscar detalles de horarios
+    const idsHorarios = turnos.map(t => t.horario_id);
+    const { data: infoHorarios } = await supabaseA.from('Horarios')
+      .select('id, hora, destino, origen')
+      .in('id', idsHorarios);
 
-    const msgsRes = await axios.get(
-      `https://hst-api.wialon.com/wialon/ajax.html?svc=messages/load_interval&params=${JSON.stringify(msgParams)}&sid=${sid}`
-    );
+    let resultado: ResultadoAuditoria | null = null;
+    let horarioMatch: any = null;
 
-    await axios.get(`https://hst-api.wialon.com/wialon/ajax.html?svc=core/logout&params={}&sid=${sid}`);
+    if (infoHorarios) {
+        for (const h of infoHorarios) {
+            // CORRECCIÓN AQUÍ: Pasamos 5 argumentos. El último es "" porque en webhook no usamos raw GPS time string extra.
+            
+            // Intento 1: Auditar como Llegada (Destino)
+            let audit = auditarMovimiento(h.destino, h.hora, geocercaWialon, horaGps, "");
+            
+            // Intento 2: Auditar como Salida (Origen)
+            if (!audit && h.origen) {
+                audit = auditarMovimiento(h.origen, h.hora, geocercaWialon, horaGps, "");
+            }
 
-    const mensajes = msgsRes.data.messages || [];
+            if (audit) {
+                resultado = audit;
+                horarioMatch = h;
+                break;
+            }
+        }
+    }
 
-    res.status(200).json({
-      estado_actual: {
-        bus_id: UNIT_ID,
-        hora_ultimo_mensaje_wialon: horaHumana,
-        timestamp_ultimo: ultimoMensaje
-      },
-      historial_crudo: {
-        cantidad_mensajes_encontrados: msgsRes.data.count,
-        mensajes_recibidos: mensajes.length,
-        ejemplo_mensaje: mensajes[0] || "NINGUNO"
-      },
-      DIAGNOSTICO_FINAL: mensajes.length > 0 
-        ? "✅ EL BUS TIENE HISTORIAL. El problema es la PLANTILLA DEL REPORTE 7." 
-        : "❌ EL BUS NO TIENE HISTORIAL. La simulación actualiza la posición pero no guarda la ruta."
-    });
+    if (resultado && horarioMatch) {
+        const docId = `${unitClean}_${hoyCol.replace(/-/g, '')}_${horarioMatch.hora.replace(/:/g, '')}`;
+        
+        await db.collection('auditoria_viajes').doc(docId).set({
+            bus: unitClean,
+            ruta: horarioMatch.destino,
+            origen_programado: horarioMatch.origen,
+            programado: horarioMatch.hora,
+            gps_llegada: resultado.hora_gps,
+            geocerca_wialon: geocercaWialon,
+            retraso_minutos: resultado.retraso_minutos,
+            estado: resultado.estado,
+            evento: resultado.evento,
+            fecha: hoyCol,
+            timestamp: new Date(),
+            origen_datos: "WEBHOOK"
+        }, { merge: true });
+
+        return res.json({ success: true, audit: resultado });
+    }
+
+    return res.json({ success: false, msg: "No coincide con ningún turno" });
 
   } catch (e: any) {
-    res.status(500).json({ error: e.message });
+    return res.status(500).json({ error: e.message });
   }
 }
