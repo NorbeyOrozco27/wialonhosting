@@ -1,17 +1,16 @@
-// api/audit-batch.ts - CORREGIDO (Match de nombres y Lógica de Origen)
+// api/audit-batch.ts - VERSIÓN FINAL CORREGIDA (SALIDAS)
 import { supabaseA } from '../lib/supabase.js';
 import { db } from '../lib/firebase.js';
-// CORRECCIÓN AQUÍ: Importamos la función correcta para datos crudos
-import { obtenerMensajesRaw } from '../lib/wialon.js'; 
+import { obtenerMensajesRaw } from '../lib/wialon.js';
 import { auditarMovimiento } from '../lib/util.js';
-import { calcularDistancia, obtenerCoordenadas } from '../lib/config.js'; // Asegúrate que config.ts tenga obtenerCoordenadas
+import { calcularDistancia, obtenerCoordenadas } from '../lib/config.js';
 import axios from 'axios';
 
 export default async function handler(req: any, res: any) {
   const token = process.env.WIALON_TOKEN;
   let fechaReferencia = new Date();
   
-  // 1. Sincronización de Hora (Wialon vs Servidor)
+  // 1. Sincronización de Hora
   try {
      const login = await axios.get(`https://hst-api.wialon.com/wialon/ajax.html?svc=token/login&params={"token":"${token}"}`);
      const sid = login.data.eid;
@@ -25,18 +24,17 @@ export default async function handler(req: any, res: any) {
   const hoyCol = fechaReferencia.toLocaleDateString('en-CA', {timeZone: 'America/Bogota'});
 
   try {
-    // 2. OBTENER PLAN (Incluyendo ORIGEN)
+    // 2. OBTENER PLAN
     const { data: plan } = await supabaseA.from('operacion_diaria').select('vehiculo_id, horario_id').eq('fecha', hoyCol);
     const { data: vehiculos } = await supabaseA.from('Vehículos').select('id, numero_interno');
     const { data: horarios } = await supabaseA.from('Horarios').select('id, hora, origen, destino');
 
     if (!plan || plan.length === 0) return res.json({ msg: `Sin plan para ${hoyCol}` });
 
-    // 3. MAPEO DE IDS WIALON (Necesario para Raw Data)
+    // 3. MAPEO DE IDS WIALON
     const login = await axios.get(`https://hst-api.wialon.com/wialon/ajax.html?svc=token/login&params={"token":"${token}"}`);
     const sid = login.data.eid;
     
-    // Traemos todos los buses para saber sus IDs internos
     const searchRes = await axios.get(`https://hst-api.wialon.com/wialon/ajax.html?svc=core/search_items&params={"spec":{"itemsType":"avl_unit","propName":"sys_name","propValueMask":"*","sortType":"sys_name"},"force":1,"flags":1,"from":0,"to":5000}&sid=${sid}`);
     
     const wialonUnitsMap: Record<string, number> = {};
@@ -48,7 +46,7 @@ export default async function handler(req: any, res: any) {
     }
     await axios.get(`https://hst-api.wialon.com/wialon/ajax.html?svc=core/logout&params={}&sid=${sid}`);
 
-    // 4. DESCARGAR TRAZAS GPS (Usando obtenerMensajesRaw)
+    // 4. DESCARGAR TRAZAS GPS
     const busesEnPlan = [...new Set(plan.map(p => {
         const v = vehiculos?.find(v => v.id === p.vehiculo_id);
         return v ? String(v.numero_interno) : null;
@@ -56,10 +54,9 @@ export default async function handler(req: any, res: any) {
 
     const idsParaConsultar = busesEnPlan.map(num => wialonUnitsMap[num as string]).filter(x => x);
     
-    // Aquí usamos la función correcta importada de wialon.ts
     const trazasGPS = await obtenerMensajesRaw(idsParaConsultar, inicioTS, finTS);
 
-    // 5. AUDITORÍA (Cruzando Plan vs GPS Raw)
+    // 5. AUDITORÍA (Lógica de Salida)
     let auditados = 0;
     const logs: string[] = [];
 
@@ -76,47 +73,43 @@ export default async function handler(req: any, res: any) {
         const traza = trazasGPS.find((t: any) => t.unitId === wialonID);
         if (!traza || !traza.messages || traza.messages.length === 0) continue;
 
-        // AUDITAR SALIDA (ORIGEN)
-        const audit = auditarMovimiento(
-            hInfo.origen, // Validamos el ORIGEN
-            hInfo.hora, 
-            0, 0, "" // Placeholder inicial
-        );
-        
-        // Si no podemos identificar el origen, saltamos
+        // Validamos el ORIGEN para auditoría de salida
+        const audit = auditarMovimiento(hInfo.origen, hInfo.hora, 0, 0, "");
         if (!audit) continue; 
         
-        // Buscamos manualmente en la traza GPS
-        // Necesitamos encontrar el punto GPS más cercano al ORIGEN a la hora programada
         const coordsOrigen = obtenerCoordenadas(hInfo.origen);
         if (!coordsOrigen) continue;
 
+        // === VARIABLES PARA BUSCAR EL MEJOR MATCH DE SALIDA ===
         let mejorMatch = null;
-        let menorDistancia = 999999;
+        let menorDiferenciaTiempo = 999999; // <--- ESTA ES LA VARIABLE QUE FALTABA
         
-        // Convertir hora programada a minutos del día
         const [hP, mP] = hInfo.hora.split(':').map(Number);
         const minutosProg = hP * 60 + mP;
 
         for (const msg of traza.messages) {
             if (!msg.pos) continue;
 
-            // Hora GPS (Corregida a Colombia -5)
             const fechaGPS = new Date(msg.t * 1000);
             let horasGPS = fechaGPS.getUTCHours() - 5;
             if (horasGPS < 0) horasGPS += 24;
             const minutosGPS = horasGPS * 60 + fechaGPS.getUTCMinutes();
 
-            // Ventana de tiempo: Buscamos si el bus estuvo en el origen +/- 90 min de la hora de salida
-            if (Math.abs(minutosGPS - minutosProg) > 90) continue;
+            // Ventana amplia: +/- 120 min
+            if (Math.abs(minutosGPS - minutosProg) > 120) continue;
 
             const dist = calcularDistancia(msg.pos.y, msg.pos.x, coordsOrigen.lat, coordsOrigen.lon);
 
-            // Si está en el radio de la terminal (ej: 800m)
-            if (dist < 800) {
-                // Buscamos el momento en que estuvo MÁS CERCA o el primero que entró
-                if (dist < menorDistancia) {
-                    menorDistancia = dist;
+            // Tolerancia de 1500m (1.5km) para asegurar que está en la terminal
+            if (dist < 1500) {
+                // Calculamos qué tan cerca está este punto GPS de la HORA PROGRAMADA
+                const diferenciaTiempo = Math.abs(minutosGPS - minutosProg);
+                
+                // Buscamos el punto que esté MÁS CERCA EN EL TIEMPO a la hora programada.
+                // Si el bus llega a las 6:25 (diff 35) y sale a las 6:59 (diff 1), 
+                // esto elegirá las 6:59.
+                if (diferenciaTiempo < menorDiferenciaTiempo) {
+                    menorDiferenciaTiempo = diferenciaTiempo;
                     mejorMatch = {
                         hora_real: `${horasGPS.toString().padStart(2,'0')}:${fechaGPS.getUTCMinutes().toString().padStart(2,'0')}:00`,
                         diferencia: minutosGPS - minutosProg,

@@ -11,25 +11,21 @@ export interface ResultadoAuditoria {
 }
 
 export function auditarMovimiento(
-  origen: string, // <--- AHORA IMPORTA EL ORIGEN
+  origen: string, 
   horaTurno: string, 
   latBus: number, 
   lonBus: number,
   horaGpsStr: string
 ): ResultadoAuditoria | null {
   
-  // 1. Obtenemos las coordenadas del ORIGEN (Donde debe estar el bus para salir)
   const puntoControl = obtenerCoordenadas(origen);
-  
-  if (!puntoControl) return null; // No sabemos dónde es ese origen
+  if (!puntoControl) return null;
 
-  // 2. Calcular Distancia al ORIGEN
+  // 1. Validar Ubicación
   const distanciaMetros = calcularDistancia(latBus, lonBus, puntoControl.lat, puntoControl.lon);
+  if (distanciaMetros > 1500) return null; // Tolerancia 1.5km
 
-  // Tolerancia: 2km alrededor de la terminal/parqueadero de salida
-  if (distanciaMetros > 2000) return null;
-
-  // 3. Parseo de tiempos
+  // 2. Parseo de tiempos
   const [hP, mP] = horaTurno.split(':').map(Number);
   const minProg = hP * 60 + mP;
 
@@ -41,19 +37,28 @@ export function auditarMovimiento(
   if (hG < 0) hG += 24;
 
   const minGps = hG * 60 + mG;
-
-  // 4. Cálculo de Diferencia (Hora Real Salida - Hora Programada Salida)
   const diferencia = minGps - minProg;
 
-  // Ventana de tiempo: Buscamos salidas entre 1 hora antes y 2 horas después
-  if (diferencia < -60 || diferencia > 120) return null;
+  // 3. LÓGICA DE NEGOCIO MEJORADA
+  // Si es origen, buscamos coincidencia cercana a la hora de salida.
+  // Ventana: Desde 2 horas antes hasta 30 min después
+  if (diferencia < -120 || diferencia > 30) return null;
+
+  // ESTADOS (Reglas de Negocio)
+  // - Si sale antes de tiempo (ej: -5 min): ADELANTADO
+  // - Si sale después (ej: +5 min): RETRASADO
+  // - Entre -5 y +5: A TIEMPO
+  
+  let estado: "RETRASADO" | "ADELANTADO" | "A TIEMPO" = "A TIEMPO";
+  if (diferencia > 5) estado = "RETRASADO";
+  if (diferencia < -5) estado = "ADELANTADO";
 
   return {
-    evento: "SALIDA", // Estamos auditando la salida
+    evento: "EN_TERMINAL", // Indica que el bus está en posición de salida
     punto: puntoControl.nombre,
     retraso_minutos: diferencia,
     hora_gps: `${hG.toString().padStart(2, '0')}:${mG.toString().padStart(2, '0')}:00`,
-    estado: diferencia > 5 ? "RETRASADO" : (diferencia < -10 ? "ADELANTADO" : "A TIEMPO"),
+    estado: estado,
     distancia_punto: Math.round(distanciaMetros)
   };
 }
