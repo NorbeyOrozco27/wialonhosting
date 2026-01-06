@@ -2,8 +2,8 @@
 export const RUTAS_MAESTRAS: Record<string, any> = {
   "NORTE": { 
     checkpoints: [
-      { nombre: "T. CIT CEJA", tti: 0, lat: 6.031375, lon: -75.428140 }, // Origen
-      { nombre: "T. NORTE", tti: 110, lat: 6.278344, lon: -75.570674 }   // Destino
+      { nombre: "T. CIT CEJA", tti: 0, lat: 6.031375, lon: -75.428140 },
+      { nombre: "T. NORTE", tti: 110, lat: 6.278344, lon: -75.570674 }
     ] 
   },
   "SUR": { 
@@ -24,7 +24,7 @@ export const RUTAS_MAESTRAS: Record<string, any> = {
       { nombre: "T. LA UNION 2", tti: 40, lat: 5.972245, lon: -75.358896 }
     ] 
   },
-  "EXPO": { // Agregué EXPO por si acaso tienes esa ruta en Supabase
+  "EXPO": { 
     checkpoints: [
       { nombre: "T. CIT CEJA", tti: 0, lat: 6.031375, lon: -75.428140 },
       { nombre: "T. EXPO", tti: 90, lat: 6.237823, lon: -75.573333 }
@@ -51,11 +51,13 @@ export function calcularDistancia(lat1: number, lon1: number, lat2: number, lon2
 export function identificarRuta(destinoDB: string) {
   if (!destinoDB) return null;
   const d = destinoDB.toUpperCase();
-  // El orden importa: busca coincidencias específicas primero
+  
+  // Lógica mejorada para detectar rutas
   if (d.includes("NORTE")) return "NORTE";
   if (d.includes("SUR"))   return "SUR";
-  if (d.includes("UNION")) return "UNION";
-  if (d.includes("RIONEGRO")) return "RIONEGRO";
+  if (d.includes("UNION") || d.includes("UNIÓN")) return "UNION";
+  if (d.includes("RIONEGRO") || d.includes("RIO")) return "RIONEGRO";
   if (d.includes("EXPO")) return "EXPO";
+  
   return null;
 }
