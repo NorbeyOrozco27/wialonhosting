@@ -1,39 +1,17 @@
 // lib/config.ts
 export const RUTAS_MAESTRAS: Record<string, any> = {
-  // Coordenadas exactas que me pasaste
-  "NORTE": { 
-    checkpoints: [
-      { nombre: "T. CIT CEJA", tti: 0, lat: 6.031375, lon: -75.428140 },
-      { nombre: "T. NORTE", tti: 110, lat: 6.278344, lon: -75.570674 }
-    ] 
-  },
-  "SUR": { 
-    checkpoints: [
-      { nombre: "T. CIT CEJA", tti: 0, lat: 6.031375, lon: -75.428140 },
-      { nombre: "T. SUR", tti: 110, lat: 6.216175, lon: -75.587963 }
-    ] 
-  },
-  "RIONEGRO": { 
-    checkpoints: [
-      { nombre: "T. CIT CEJA", tti: 0, lat: 6.031375, lon: -75.428140 },
-      { nombre: "T. RIONEGRO", tti: 50, lat: 6.151535, lon: -75.373023 }
-    ] 
-  },
-  "UNION": { 
-    checkpoints: [
-      { nombre: "T. CIT CEJA", tti: 0, lat: 6.031375, lon: -75.428140 },
-      { nombre: "T. LA UNION 2", tti: 40, lat: 5.972245, lon: -75.358896 }
-    ] 
-  },
-  "EXPO": { 
-    checkpoints: [
-      { nombre: "T. CIT CEJA", tti: 0, lat: 6.031375, lon: -75.428140 },
-      { nombre: "T. EXPO", tti: 90, lat: 6.237823, lon: -75.573333 }
-    ] 
+  // Mapeamos los nombres de Supabase a tus Geocercas de Wialon
+  "MAPEO_LUGARES": {
+    "LA CEJA": { nombre: "T. CIT CEJA", lat: 6.031375, lon: -75.428140 },
+    "MEDELLIN TERM. NORTE": { nombre: "T. NORTE", lat: 6.278344, lon: -75.570674 },
+    "MEDELLIN TERM. SUR": { nombre: "T. SUR", lat: 6.216175, lon: -75.587963 },
+    "RIONEGRO": { nombre: "T. RIONEGRO", lat: 6.151535, lon: -75.373023 },
+    "LA UNIÓN": { nombre: "T. LA UNION 2", lat: 5.972245, lon: -75.358896 },
+    "LA UNION": { nombre: "T. LA UNION 2", lat: 5.972245, lon: -75.358896 },
+    "EXPO": { nombre: "T. EXPO", lat: 6.237823, lon: -75.573333 }
   }
 };
 
-// Fórmula matemática de distancia
 export function calcularDistancia(lat1: number, lon1: number, lat2: number, lon2: number): number {
   if (!lat1 || !lon1 || !lat2 || !lon2) return 999999;
   const R = 6371e3; 
@@ -41,7 +19,6 @@ export function calcularDistancia(lat1: number, lon1: number, lat2: number, lon2
   const φ2 = lat2 * Math.PI/180;
   const Δφ = (lat2-lat1) * Math.PI/180;
   const Δλ = (lon2-lon1) * Math.PI/180;
-
   const a = Math.sin(Δφ/2) * Math.sin(Δφ/2) +
             Math.cos(φ1) * Math.cos(φ2) *
             Math.sin(Δλ/2) * Math.sin(Δλ/2);
@@ -49,13 +26,21 @@ export function calcularDistancia(lat1: number, lon1: number, lat2: number, lon2
   return R * c; 
 }
 
-export function identificarRuta(destinoDB: string) {
-  if (!destinoDB) return null;
-  const d = destinoDB.toUpperCase();
-  if (d.includes("NORTE")) return "NORTE";
-  if (d.includes("SUR"))   return "SUR";
-  if (d.includes("UNION")) return "UNION";
-  if (d.includes("RIONEGRO")) return "RIONEGRO";
-  if (d.includes("EXPO")) return "EXPO";
+export function obtenerCoordenadas(lugarSupabase: string) {
+  if (!lugarSupabase) return null;
+  const dbName = lugarSupabase.toUpperCase().trim();
+  const mapa = RUTAS_MAESTRAS["MAPEO_LUGARES"];
+  
+  // Búsqueda exacta
+  if (mapa[dbName]) return mapa[dbName];
+  
+  // Búsqueda aproximada
+  if (dbName.includes("NORTE")) return mapa["MEDELLIN TERM. NORTE"];
+  if (dbName.includes("SUR")) return mapa["MEDELLIN TERM. SUR"];
+  if (dbName.includes("RIO")) return mapa["RIONEGRO"];
+  if (dbName.includes("UNION") || dbName.includes("UNIÓN")) return mapa["LA UNION"];
+  if (dbName.includes("CEJA")) return mapa["LA CEJA"];
+  if (dbName.includes("EXPO")) return mapa["EXPO"];
+
   return null;
 }

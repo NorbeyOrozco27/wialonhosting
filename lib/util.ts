@@ -1,5 +1,5 @@
 // lib/util.ts
-import { RUTAS_MAESTRAS, identificarRuta, calcularDistancia } from './config.js';
+import { obtenerCoordenadas, calcularDistancia } from './config.js';
 
 export interface ResultadoAuditoria {
   evento: string;
@@ -11,77 +11,49 @@ export interface ResultadoAuditoria {
 }
 
 export function auditarMovimiento(
-  destino: string, 
+  origen: string, // <--- AHORA IMPORTA EL ORIGEN
   horaTurno: string, 
-  dato1: number | string, 
-  dato2: number | string, 
-  dato3?: string
+  latBus: number, 
+  lonBus: number,
+  horaGpsStr: string
 ): ResultadoAuditoria | null {
   
-  const categoria = identificarRuta(destino);
-  if (!categoria) return null;
-
-  const config = RUTAS_MAESTRAS[categoria];
+  // 1. Obtenemos las coordenadas del ORIGEN (Donde debe estar el bus para salir)
+  const puntoControl = obtenerCoordenadas(origen);
   
-  // 1. Identificar el punto de control (Destino)
-  const checkpointObjetivo = config.checkpoints[config.checkpoints.length - 1];
-  if (!checkpointObjetivo) return null;
+  if (!puntoControl) return null; // No sabemos dónde es ese origen
 
-  const esModoGPS = typeof dato1 === 'number' && typeof dato2 === 'number';
-  
-  let horaGpsStr = "";
-  let distanciaMetros = 0;
+  // 2. Calcular Distancia al ORIGEN
+  const distanciaMetros = calcularDistancia(latBus, lonBus, puntoControl.lat, puntoControl.lon);
 
-  if (esModoGPS) {
-      const lat = dato1 as number;
-      const lon = dato2 as number;
-      horaGpsStr = dato3 || "";
+  // Tolerancia: 2km alrededor de la terminal/parqueadero de salida
+  if (distanciaMetros > 2000) return null;
 
-      if (!horaGpsStr) return null;
-
-      if (checkpointObjetivo.lat) {
-          distanciaMetros = calcularDistancia(lat, lon, checkpointObjetivo.lat, checkpointObjetivo.lon);
-          // Tolerancia de 3km para asegurar detección
-          if (distanciaMetros > 3000) return null;
-      }
-  } else {
-      // Modo Webhook
-      const nombreGeocercaEntrante = String(dato1).trim().toUpperCase();
-      horaGpsStr = String(dato2);
-      if (nombreGeocercaEntrante !== checkpointObjetivo.nombre.toUpperCase()) return null;
-      distanciaMetros = 0; 
-  }
-
-  // 2. Parseo de tiempos (Hora Programada Colombia)
+  // 3. Parseo de tiempos
   const [hP, mP] = horaTurno.split(':').map(Number);
-  const minProgSalida = hP * 60 + mP;
+  const minProg = hP * 60 + mP;
 
-  // 3. Parseo de tiempos (Hora GPS - Wialon viene en UTC)
   const parteTiempo = horaGpsStr.includes(' ') ? horaGpsStr.split(' ')[1] : horaGpsStr;
   let [hG, mG] = parteTiempo.split(':').map(Number);
   
-  // --- CORRECCIÓN DE ZONA HORARIA (LA SOLUCIÓN MÁGICA) ---
-  // Wialon envía UTC. Colombia es UTC-5.
-  // Restamos 5 horas a la hora del GPS.
+  // Corrección Zona Horaria (-5)
   hG = hG - 5;
-  if (hG < 0) hG += 24; // Ajuste si la resta pasa al día anterior (ej: 02:00 - 5 = 21:00)
+  if (hG < 0) hG += 24;
 
   const minGps = hG * 60 + mG;
 
-  // 4. Cálculo de Diferencia
-  const esperadoEnPunto = minProgSalida + checkpointObjetivo.tti;
-  const diferencia = minGps - esperadoEnPunto;
+  // 4. Cálculo de Diferencia (Hora Real Salida - Hora Programada Salida)
+  const diferencia = minGps - minProg;
 
-  // Filtro de coherencia: Ahora que las horas están corregidas,
-  // podemos bajar la tolerancia a algo realista (ej: 90 minutos)
-  if (Math.abs(diferencia) > 90) return null;
+  // Ventana de tiempo: Buscamos salidas entre 1 hora antes y 2 horas después
+  if (diferencia < -60 || diferencia > 120) return null;
 
   return {
-    evento: "LLEGADA",
-    punto: checkpointObjetivo.nombre,
+    evento: "SALIDA", // Estamos auditando la salida
+    punto: puntoControl.nombre,
     retraso_minutos: diferencia,
-    hora_gps: `${hG.toString().padStart(2, '0')}:${mG.toString().padStart(2, '0')}:00`, // Guardamos la hora corregida a Colombia
-    estado: diferencia > 10 ? "RETRASADO" : (diferencia < -10 ? "ADELANTADO" : "A TIEMPO"),
+    hora_gps: `${hG.toString().padStart(2, '0')}:${mG.toString().padStart(2, '0')}:00`,
+    estado: diferencia > 5 ? "RETRASADO" : (diferencia < -10 ? "ADELANTADO" : "A TIEMPO"),
     distancia_punto: Math.round(distanciaMetros)
   };
 }
