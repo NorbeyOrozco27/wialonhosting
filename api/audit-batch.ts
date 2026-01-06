@@ -1,16 +1,12 @@
-// api/audit-batch.ts
+// api/audit-batch.ts - MODO ESCRITURA DIRECTA (ASEGURADA)
 import { supabaseA } from '../lib/supabase.js';
 import { db } from '../lib/firebase.js';
 import { ejecutarInformeCosecha } from '../lib/wialon.js';
-// IMPORTANTE: Aquí importamos lo que acabamos de exportar en util.ts
 import { auditarMovimiento } from '../lib/util.js';
 import { calcularDistancia, RUTAS_MAESTRAS, identificarRuta } from '../lib/config.js';
 import axios from 'axios';
 
 export default async function handler(req: any, res: any) {
-  // ... (Aquí va el código del Modo Rastreador que te pasé en la respuesta anterior)
-  // Te lo resumo para que compile, pero usa la lógica completa del "Modo Rastreador"
-  
   const token = process.env.WIALON_TOKEN;
   let fechaReferencia = new Date();
   
@@ -36,7 +32,6 @@ export default async function handler(req: any, res: any) {
     const filas = await ejecutarInformeCosecha(inicioTS, finTS);
 
     let auditadosCount = 0;
-    const batch = db.batch();
     const logs: string[] = [];
     const rastreo: string[] = [];
 
@@ -58,46 +53,44 @@ export default async function handler(req: any, res: any) {
             const hInfo = horarios?.find(h => h.id === tAsignado.horario_id);
             if (!hInfo) continue;
 
-            // RASTREO PARA DEBUG
             const categoria = identificarRuta(hInfo.destino);
             if (categoria) {
                 const config = RUTAS_MAESTRAS[categoria];
                 const cp = config.checkpoints[config.checkpoints.length - 1];
                 const dist = calcularDistancia(lat, lon, cp.lat, cp.lon);
                 
-                if (dist < 10000 && rastreo.length < 50) { // Loguear si está a menos de 10km
-                     rastreo.push(`Bus ${unitClean} a ${Math.round(dist)}m de ${cp.nombre} (Destino: ${hInfo.destino})`);
+                // Tolerancia de 5km para detectar cercanía
+                if (dist < 5000) { 
+                    const audit = auditarMovimiento(hInfo.destino, hInfo.hora, lat, lon, hora);
+                    
+                    if (audit) {
+                        auditadosCount++;
+                        const docId = `${unitClean}_${hoyCol.replace(/-/g, '')}_${hInfo.hora.replace(/:/g, '')}`;
+                        
+                        // ESCRITURA DIRECTA (Sin Batch, para asegurar guardado)
+                        await db.collection('auditoria_viajes').doc(docId).set({
+                            bus: unitClean,
+                            ruta: hInfo.destino,
+                            programado: hInfo.hora,
+                            gps_llegada: audit.hora_gps,
+                            geocerca_detectada: audit.punto,
+                            distancia_metros: audit.distancia_punto,
+                            retraso_minutos: audit.retraso_minutos,
+                            estado: audit.estado,
+                            evento: audit.evento,
+                            fecha: hoyCol,
+                            timestamp: new Date()
+                        }, { merge: true });
+                        
+                        logs.push(`💾 GUARDADO: ${unitClean} | ${audit.estado}`);
+                        break; 
+                    }
                 }
-            }
-
-            // AUDITORÍA
-            const audit = auditarMovimiento(hInfo.destino, hInfo.hora, lat, lon, hora);
-            
-            if (audit) {
-                auditadosCount++;
-                const docId = `${unitClean}_${hoyCol.replace(/-/g, '')}_${hInfo.hora.replace(/:/g, '')}`;
-                
-                batch.set(db.collection('auditoria_viajes').doc(docId), {
-                    bus: unitClean,
-                    ruta: hInfo.destino,
-                    programado: hInfo.hora,
-                    gps_llegada: audit.hora_gps,
-                    geocerca_detectada: audit.punto,
-                    distancia_metros: audit.distancia_punto,
-                    retraso_minutos: audit.retraso_minutos,
-                    estado: audit.estado,
-                    evento: audit.evento,
-                    fecha: hoyCol,
-                    timestamp: new Date()
-                }, { merge: true });
-                
-                logs.push(`✅ MATCH: ${unitClean} | ${audit.estado}`);
-                break; 
             }
         }
     }
 
-    if (auditadosCount > 0) await batch.commit();
+    // No hay batch.commit() aquí porque ya guardamos uno por uno
 
     return res.json({
         success: true,
@@ -106,8 +99,7 @@ export default async function handler(req: any, res: any) {
             filas: filas.length,
             auditados: auditadosCount
         },
-        RASTREO_GPS: rastreo,
-        logs: logs
+        logs: logs.slice(0, 50)
     });
 
   } catch (e: any) {
