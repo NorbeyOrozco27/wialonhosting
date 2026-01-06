@@ -70,7 +70,7 @@ export function auditarMovimiento(
   const esperadoEnPunto = minProgSalida + checkpointObjetivo.tti;
   const diferencia = minGps - esperadoEnPunto;
 
-  if (Math.abs(diferencia) > 180) return null;
+  if (Math.abs(diferencia) > 720) return null;
 
   return {
     evento: "LLEGADA",
