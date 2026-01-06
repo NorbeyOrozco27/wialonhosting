@@ -1,7 +1,8 @@
-// api/audit-batch.ts - VERSIÓN CORREGIDA (Sin bloqueo de coordenadas 0,0)
+// api/audit-batch.ts - VERSIÓN FINAL CORREGIDA (SIN ERRORES DE DUPLICADOS)
 import { supabaseA } from '../lib/supabase.js';
 import { db } from '../lib/firebase.js';
 import { obtenerMensajesRaw } from '../lib/wialon.js';
+import { auditarMovimiento } from '../lib/util.js';
 import { calcularDistancia, obtenerCoordenadas } from '../lib/config.js';
 import axios from 'axios';
 
@@ -26,7 +27,6 @@ export default async function handler(req: any, res: any) {
     // 2. OBTENER PLAN
     const { data: plan } = await supabaseA.from('operacion_diaria').select('vehiculo_id, horario_id').eq('fecha', hoyCol);
     const { data: vehiculos } = await supabaseA.from('Vehículos').select('id, numero_interno');
-    // Asegúrate de que 'origen' esté escrito exactamente así en tu Supabase (minúsculas o como sea la columna)
     const { data: horarios } = await supabaseA.from('Horarios').select('id, hora, origen, destino');
 
     if (!plan || plan.length === 0) return res.json({ msg: `Sin plan para ${hoyCol}` });
@@ -53,9 +53,10 @@ export default async function handler(req: any, res: any) {
     }))].filter(x => x);
 
     const idsParaConsultar = busesEnPlan.map(num => wialonUnitsMap[num as string]).filter(x => x);
+    
     const trazasGPS = await obtenerMensajesRaw(idsParaConsultar, inicioTS, finTS);
 
-    // 5. AUDITORÍA (Lógica de Salida)
+    // 5. AUDITORÍA
     let auditados = 0;
     const logs: string[] = [];
 
@@ -65,6 +66,24 @@ export default async function handler(req: any, res: any) {
         
         if (!vInfo || !hInfo) continue;
         
+        // ============================================================
+        // 🛑 FILTRO DE TIEMPO (Definimos variables AQUÍ para usarlas luego)
+        // ============================================================
+        
+        // 1. Obtener minutos del día programados
+        const [hP, mP] = hInfo.hora.split(':').map(Number);
+        const minutosProg = hP * 60 + mP;
+        
+        // 2. Obtener hora actual en Colombia
+        const ahoraCol = new Date(new Date().toLocaleString("en-US", {timeZone: "America/Bogota"}));
+        const minutosAhora = ahoraCol.getHours() * 60 + ahoraCol.getMinutes();
+        
+        // 3. Regla: Si el turno es más de 30 min en el futuro, IGNORAR.
+        if (minutosProg > (minutosAhora + 30)) {
+             continue; // Salta al siguiente turno
+        }
+        // ============================================================
+        
         const numBus = String(vInfo.numero_interno);
         const wialonID = wialonUnitsMap[numBus];
         if (!wialonID) continue;
@@ -72,21 +91,17 @@ export default async function handler(req: any, res: any) {
         const traza = trazasGPS.find((t: any) => t.unitId === wialonID);
         if (!traza || !traza.messages || traza.messages.length === 0) continue;
 
-        // --- CORRECCIÓN: Obtener coordenadas directamente sin llamar a auditarMovimiento con 0,0 ---
-        if (!hInfo.origen) continue; // Si no hay origen, saltar
+        // Validamos el ORIGEN para auditoría de salida
+        const audit = auditarMovimiento(hInfo.origen, hInfo.hora, 0, 0, "");
+        if (!audit) continue; 
         
         const coordsOrigen = obtenerCoordenadas(hInfo.origen);
-        if (!coordsOrigen) {
-            // logs.push(`⚠️ Origen desconocido: ${hInfo.origen}`);
-            continue;
-        }
+        if (!coordsOrigen) continue;
 
-        // === VARIABLES PARA BUSCAR EL MEJOR MATCH DE SALIDA ===
         let mejorMatch = null;
         let menorDiferenciaTiempo = 999999; 
         
-        const [hP, mP] = hInfo.hora.split(':').map(Number);
-        const minutosProg = hP * 60 + mP;
+        // YA NO redeclaramos [hP, mP] ni minutosProg aquí, porque ya existen arriba
 
         for (const msg of traza.messages) {
             if (!msg.pos) continue;
@@ -101,11 +116,10 @@ export default async function handler(req: any, res: any) {
 
             const dist = calcularDistancia(msg.pos.y, msg.pos.x, coordsOrigen.lat, coordsOrigen.lon);
 
-            // Tolerancia de 1500m (1.5km) para asegurar que está en la terminal
+            // Tolerancia de 1500m (1.5km)
             if (dist < 1500) {
                 const diferenciaTiempo = Math.abs(minutosGPS - minutosProg);
                 
-                // Buscamos el punto más cercano en TIEMPO a la hora programada
                 if (diferenciaTiempo < menorDiferenciaTiempo) {
                     menorDiferenciaTiempo = diferenciaTiempo;
                     const diffReal = minutosGPS - minutosProg;
