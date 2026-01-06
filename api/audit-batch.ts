@@ -1,8 +1,7 @@
-// api/audit-batch.ts - VERSIÓN FINAL CORREGIDA (SIN ERRORES DE DUPLICADOS)
+// api/audit-batch.ts - VERSIÓN FINAL (CORREGIDO ERROR 0,0)
 import { supabaseA } from '../lib/supabase.js';
 import { db } from '../lib/firebase.js';
 import { obtenerMensajesRaw } from '../lib/wialon.js';
-import { auditarMovimiento } from '../lib/util.js';
 import { calcularDistancia, obtenerCoordenadas } from '../lib/config.js';
 import axios from 'axios';
 
@@ -53,10 +52,9 @@ export default async function handler(req: any, res: any) {
     }))].filter(x => x);
 
     const idsParaConsultar = busesEnPlan.map(num => wialonUnitsMap[num as string]).filter(x => x);
-    
     const trazasGPS = await obtenerMensajesRaw(idsParaConsultar, inicioTS, finTS);
 
-    // 5. AUDITORÍA
+    // 5. AUDITORÍA (Lógica de Salida)
     let auditados = 0;
     const logs: string[] = [];
 
@@ -67,23 +65,19 @@ export default async function handler(req: any, res: any) {
         if (!vInfo || !hInfo) continue;
         
         // ============================================================
-        // 🛑 FILTRO DE TIEMPO (Definimos variables AQUÍ para usarlas luego)
+        // 🛑 FILTRO DE TIEMPO (Variable hP/mP definidas una sola vez)
         // ============================================================
-        
-        // 1. Obtener minutos del día programados
         const [hP, mP] = hInfo.hora.split(':').map(Number);
         const minutosProg = hP * 60 + mP;
         
-        // 2. Obtener hora actual en Colombia
+        // Hora actual Col
         const ahoraCol = new Date(new Date().toLocaleString("en-US", {timeZone: "America/Bogota"}));
         const minutosAhora = ahoraCol.getHours() * 60 + ahoraCol.getMinutes();
         
-        // 3. Regla: Si el turno es más de 30 min en el futuro, IGNORAR.
-        if (minutosProg > (minutosAhora + 30)) {
-             continue; // Salta al siguiente turno
-        }
+        // No auditar turnos futuros (+30 min)
+        if (minutosProg > (minutosAhora + 30)) continue;
         // ============================================================
-        
+
         const numBus = String(vInfo.numero_interno);
         const wialonID = wialonUnitsMap[numBus];
         if (!wialonID) continue;
@@ -91,17 +85,17 @@ export default async function handler(req: any, res: any) {
         const traza = trazasGPS.find((t: any) => t.unitId === wialonID);
         if (!traza || !traza.messages || traza.messages.length === 0) continue;
 
-        // Validamos el ORIGEN para auditoría de salida
-        const audit = auditarMovimiento(hInfo.origen, hInfo.hora, 0, 0, "");
-        if (!audit) continue; 
+        // --- CORRECCIÓN AQUÍ: ELIMINADA LA VALIDACIÓN QUE BLOQUEABA TODO ---
+        if (!hInfo.origen) continue;
         
         const coordsOrigen = obtenerCoordenadas(hInfo.origen);
-        if (!coordsOrigen) continue;
+        if (!coordsOrigen) {
+            // logs.push(`⚠️ Origen desconocido: ${hInfo.origen}`);
+            continue;
+        }
 
         let mejorMatch = null;
         let menorDiferenciaTiempo = 999999; 
-        
-        // YA NO redeclaramos [hP, mP] ni minutosProg aquí, porque ya existen arriba
 
         for (const msg of traza.messages) {
             if (!msg.pos) continue;
@@ -116,7 +110,7 @@ export default async function handler(req: any, res: any) {
 
             const dist = calcularDistancia(msg.pos.y, msg.pos.x, coordsOrigen.lat, coordsOrigen.lon);
 
-            // Tolerancia de 1500m (1.5km)
+            // Tolerancia 1.5km para detectar salida
             if (dist < 1500) {
                 const diferenciaTiempo = Math.abs(minutosGPS - minutosProg);
                 
