@@ -162,7 +162,7 @@ export default async function handler(req: any, res: any) {
             logs.push(`✅ SALIDA: ${numBus} desde ${hInfo.origen} | Prog: ${hInfo.hora}, Real: ${mejorMatch.hora_real} (${mejorMatch.estado})`);
         }
     }
-
+ 
     return res.json({
         success: true,
         resumen: {
