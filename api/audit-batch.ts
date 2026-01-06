@@ -1,8 +1,7 @@
-// api/audit-batch.ts - VERSIÓN FINAL CORREGIDA (SALIDAS)
+// api/audit-batch.ts - VERSIÓN CORREGIDA (Sin bloqueo de coordenadas 0,0)
 import { supabaseA } from '../lib/supabase.js';
 import { db } from '../lib/firebase.js';
 import { obtenerMensajesRaw } from '../lib/wialon.js';
-import { auditarMovimiento } from '../lib/util.js';
 import { calcularDistancia, obtenerCoordenadas } from '../lib/config.js';
 import axios from 'axios';
 
@@ -27,6 +26,7 @@ export default async function handler(req: any, res: any) {
     // 2. OBTENER PLAN
     const { data: plan } = await supabaseA.from('operacion_diaria').select('vehiculo_id, horario_id').eq('fecha', hoyCol);
     const { data: vehiculos } = await supabaseA.from('Vehículos').select('id, numero_interno');
+    // Asegúrate de que 'origen' esté escrito exactamente así en tu Supabase (minúsculas o como sea la columna)
     const { data: horarios } = await supabaseA.from('Horarios').select('id, hora, origen, destino');
 
     if (!plan || plan.length === 0) return res.json({ msg: `Sin plan para ${hoyCol}` });
@@ -53,7 +53,6 @@ export default async function handler(req: any, res: any) {
     }))].filter(x => x);
 
     const idsParaConsultar = busesEnPlan.map(num => wialonUnitsMap[num as string]).filter(x => x);
-    
     const trazasGPS = await obtenerMensajesRaw(idsParaConsultar, inicioTS, finTS);
 
     // 5. AUDITORÍA (Lógica de Salida)
@@ -73,16 +72,18 @@ export default async function handler(req: any, res: any) {
         const traza = trazasGPS.find((t: any) => t.unitId === wialonID);
         if (!traza || !traza.messages || traza.messages.length === 0) continue;
 
-        // Validamos el ORIGEN para auditoría de salida
-        const audit = auditarMovimiento(hInfo.origen, hInfo.hora, 0, 0, "");
-        if (!audit) continue; 
+        // --- CORRECCIÓN: Obtener coordenadas directamente sin llamar a auditarMovimiento con 0,0 ---
+        if (!hInfo.origen) continue; // Si no hay origen, saltar
         
         const coordsOrigen = obtenerCoordenadas(hInfo.origen);
-        if (!coordsOrigen) continue;
+        if (!coordsOrigen) {
+            // logs.push(`⚠️ Origen desconocido: ${hInfo.origen}`);
+            continue;
+        }
 
         // === VARIABLES PARA BUSCAR EL MEJOR MATCH DE SALIDA ===
         let mejorMatch = null;
-        let menorDiferenciaTiempo = 999999; // <--- ESTA ES LA VARIABLE QUE FALTABA
+        let menorDiferenciaTiempo = 999999; 
         
         const [hP, mP] = hInfo.hora.split(':').map(Number);
         const minutosProg = hP * 60 + mP;
@@ -102,18 +103,22 @@ export default async function handler(req: any, res: any) {
 
             // Tolerancia de 1500m (1.5km) para asegurar que está en la terminal
             if (dist < 1500) {
-                // Calculamos qué tan cerca está este punto GPS de la HORA PROGRAMADA
                 const diferenciaTiempo = Math.abs(minutosGPS - minutosProg);
                 
-                // Buscamos el punto que esté MÁS CERCA EN EL TIEMPO a la hora programada.
-                // Si el bus llega a las 6:25 (diff 35) y sale a las 6:59 (diff 1), 
-                // esto elegirá las 6:59.
+                // Buscamos el punto más cercano en TIEMPO a la hora programada
                 if (diferenciaTiempo < menorDiferenciaTiempo) {
                     menorDiferenciaTiempo = diferenciaTiempo;
+                    const diffReal = minutosGPS - minutosProg;
+                    
+                    let estado = "A TIEMPO";
+                    if (diffReal > 5) estado = "RETRASADO";
+                    if (diffReal < -5) estado = "ADELANTADO";
+
                     mejorMatch = {
                         hora_real: `${horasGPS.toString().padStart(2,'0')}:${fechaGPS.getUTCMinutes().toString().padStart(2,'0')}:00`,
-                        diferencia: minutosGPS - minutosProg,
-                        distancia: Math.round(dist)
+                        diferencia: diffReal,
+                        distancia: Math.round(dist),
+                        estado: estado
                     };
                 }
             }
@@ -121,7 +126,6 @@ export default async function handler(req: any, res: any) {
 
         if (mejorMatch) {
             auditados++;
-            const estado = mejorMatch.diferencia > 5 ? "RETRASADO" : (mejorMatch.diferencia < -10 ? "ADELANTADO" : "A TIEMPO");
             
             const docId = `${numBus}_${hoyCol.replace(/-/g, '')}_${hInfo.hora.replace(/:/g, '')}`;
             
@@ -134,14 +138,14 @@ export default async function handler(req: any, res: any) {
                 geocerca_origen: coordsOrigen.nombre,
                 distancia_metros: mejorMatch.distancia,
                 retraso_minutos: mejorMatch.diferencia,
-                estado: estado,
+                estado: mejorMatch.estado,
                 evento: "SALIDA",
                 fecha: hoyCol,
                 timestamp: new Date(),
                 origen_datos: "RAW_GPS"
             }, { merge: true });
 
-            logs.push(`✅ SALIDA: ${numBus} desde ${hInfo.origen} | Prog: ${hInfo.hora}, Real: ${mejorMatch.hora_real} (${estado})`);
+            logs.push(`✅ SALIDA: ${numBus} desde ${hInfo.origen} | Prog: ${hInfo.hora}, Real: ${mejorMatch.hora_real} (${mejorMatch.estado})`);
         }
     }
 
