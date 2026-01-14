@@ -1,8 +1,0 @@
-{
-  "crons": [
-    {
-      "path": "/api/audit-batch",
-      "schedule": "*/15 * * * *"
-    }
-  ] 
-}

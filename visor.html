@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Auditoría de Transportes - Visor Local</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Firebase SDKs -->
+    <script src="https://www.gstatic.com/firebasejs/9.22.0/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/9.22.0/firebase-firestore-compat.js"></script>
+    
+    <style>
+        .estado-RETRASADO { background-color: #fee2e2; color: #991b1b; }
+        .estado-ADELANTADO { background-color: #fef3c7; color: #92400e; }
+        .estado-A_TIEMPO { background-color: #dcfce7; color: #166534; }
+        .row-hover:hover { background-color: #f3f4f6; }
+    </style>
+</head>
+<body class="bg-gray-100 p-8">
+
+    <div class="max-w-7xl mx-auto">
+        <div class="flex justify-between items-center mb-6">
+            <h1 class="text-3xl font-bold text-gray-800">📡 Tablero de Auditoría</h1>
+            <div class="flex gap-2">
+                <input type="text" id="filtroBus" placeholder="Buscar Bus..." class="px-4 py-2 border rounded shadow-sm">
+                <button onclick="cargarDatos()" class="bg-blue-600 text-white px-4 py-2 rounded hover:bg-blue-700 transition">
+                    🔄 Recargar
+                </button>
+            </div>
+        </div>
+
+        <!-- Estadísticas -->
+        <div class="grid grid-cols-4 gap-4 mb-6">
+            <div class="bg-white p-4 rounded shadow border-l-4 border-blue-500">
+                <div class="text-gray-500">Total Registros</div>
+                <div class="text-2xl font-bold" id="statTotal">-</div>
+            </div>
+            <div class="bg-white p-4 rounded shadow border-l-4 border-red-500">
+                <div class="text-gray-500">Retrasados</div>
+                <div class="text-2xl font-bold" id="statRetrasados">-</div>
+            </div>
+            <div class="bg-white p-4 rounded shadow border-l-4 border-yellow-500">
+                <div class="text-gray-500">Adelantados</div>
+                <div class="text-2xl font-bold" id="statAdelantados">-</div>
+            </div>
+            <div class="bg-white p-4 rounded shadow border-l-4 border-green-500">
+                <div class="text-gray-500">A Tiempo</div>
+                <div class="text-2xl font-bold" id="statATiempo">-</div>
+            </div>
+        </div>
+
+        <!-- Tabla -->
+        <div class="bg-white rounded-lg shadow overflow-hidden">
+            <table class="min-w-full divide-y divide-gray-200">
+                <thead class="bg-gray-50">
+                    <tr>
+                        <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Bus</th>
+                        <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Ruta</th>
+                        <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Geocerca</th>
+                        <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Programado</th>
+                        <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Real (GPS)</th>
+                        <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Diferencia</th>
+                        <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Estado</th>
+                    </tr>
+                </thead>
+                <tbody class="bg-white divide-y divide-gray-200" id="tablaCuerpo">
+                    <tr>
+                        <td colspan="7" class="px-6 py-4 text-center text-gray-500">Cargando datos...</td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <script>
+        // ==========================================
+        // 🔑 CONFIGURACIÓN FIREBASE (PEGA TU JSON AQUÍ)
+        // ==========================================
+        // Nota: Usa las claves públicas del cliente web, no el service account
+        const firebaseConfig = {
+  apiKey: "AIzaSyAol0w5E2j0eELYpUBfTP-O8YBP1XhQBXg",
+  authDomain: "custom-nimbus.firebaseapp.com",
+  databaseURL: "https://custom-nimbus-default-rtdb.firebaseio.com",
+  projectId: "custom-nimbus",
+  storageBucket: "custom-nimbus.firebasestorage.app",
+  messagingSenderId: "104889583578",
+  appId: "1:104889583578:web:c79bb365c83f91291362e3"
+};
+        // ==========================================
+
+        // Inicializar Firebase
+        if (!firebase.apps.length) {
+            firebase.initializeApp(firebaseConfig);
+        }
+        const db = firebase.firestore();
+
+        // Variables globales
+        let datosGlobales = [];
+
+        // Función Principal
+        async function cargarDatos() {
+            const tbody = document.getElementById('tablaCuerpo');
+            tbody.innerHTML = '<tr><td colspan="7" class="text-center py-4">Cargando...</td></tr>';
+
+            try {
+                // Consultamos solo los del día actual (opcional, ajusta según necesidad)
+                // Para ver todo, quitamos el where. Ojo con el costo de lecturas.
+                const snapshot = await db.collection('auditoria_viajes')
+                                       .orderBy('timestamp', 'desc')
+                                       .limit(200) // Limite de seguridad para pruebas
+                                       .get();
+
+                if (snapshot.empty) {
+                    tbody.innerHTML = '<tr><td colspan="7" class="text-center py-4">No hay registros</td></tr>';
+                    return;
+                }
+
+                datosGlobales = [];
+                snapshot.forEach(doc => {
+                    datosGlobales.push({ id: doc.id, ...doc.data() });
+                });
+
+                renderizarTabla(datosGlobales);
+                actualizarStats(datosGlobales);
+
+            } catch (error) {
+                console.error("Error:", error);
+                tbody.innerHTML = `<tr><td colspan="7" class="text-center py-4 text-red-500">Error: ${error.message}</td></tr>`;
+            }
+        }
+
+        function renderizarTabla(datos) {
+            const tbody = document.getElementById('tablaCuerpo');
+            tbody.innerHTML = '';
+
+            datos.forEach(d => {
+                const estadoClass = d.estado === 'A TIEMPO' ? 'estado-A_TIEMPO' :
+                                    d.estado === 'RETRASADO' ? 'estado-RETRASADO' : 'estado-ADELANTADO';
+                
+                const estadoBadge = `<span class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full ${estadoClass}">${d.estado}</span>`;
+
+                // AJUSTE AQUÍ: Mapeo correcto de campos nuevos
+                const ruta = d.ruta || d.origen_programado || 'Desconocida';
+                const geocerca = d.geocerca_origen || d.geocerca_wialon || d.geocerca_detectada || '-';
+                const horaReal = d.gps_salida_detectada || d.gps_llegada || '-';
+
+                const row = `
+                    <tr class="row-hover">
+                        <td class="px-6 py-4 whitespace-nowrap font-medium text-gray-900">${d.bus}</td>
+                        <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">${ruta}</td>
+                        <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">${geocerca}</td>
+                        <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900">${d.programado}</td>
+                        <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">${horaReal}</td>
+                        <td class="px-6 py-4 whitespace-nowrap text-sm ${d.retraso_minutos > 0 ? 'text-red-600' : 'text-green-600'}">
+                            ${d.retraso_minutos > 0 ? '+' : ''}${d.retraso_minutos} min
+                        </td>
+                        <td class="px-6 py-4 whitespace-nowrap">${estadoBadge}</td>
+                    </tr>
+                `;
+                tbody.innerHTML += row;
+            });
+        }
+
+        function actualizarStats(datos) {
+            document.getElementById('statTotal').innerText = datos.length;
+            document.getElementById('statRetrasados').innerText = datos.filter(d => d.estado === 'RETRASADO').length;
+            document.getElementById('statAdelantados').innerText = datos.filter(d => d.estado === 'ADELANTADO').length;
+            document.getElementById('statATiempo').innerText = datos.filter(d => d.estado === 'A TIEMPO').length;
+        }
+
+        // Filtro en tiempo real
+        document.getElementById('filtroBus').addEventListener('input', (e) => {
+            const bus = e.target.value.toLowerCase();
+            const filtrados = datosGlobales.filter(d => d.bus.toLowerCase().includes(bus));
+            renderizarTabla(filtrados);
+        });
+
+        // Cargar al inicio
+        cargarDatos();
+
+    </script>
+</body>
+</html>

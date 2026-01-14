@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <title>Centro de Mando TransUnidos</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <meta http-equiv="refresh" content="60"> <!-- Refresco automático de seguridad -->
+</head>
+<body class="bg-slate-900 text-white p-6">
+
+    <div class="max-w-6xl mx-auto">
+        <div class="flex justify-between items-center mb-8">
+            <div>
+                <h1 class="text-3xl font-bold text-blue-400">✈️ Tablero de Salidas</h1>
+                <p class="text-slate-400">Monitoreo en tiempo real (Supabase + GPS)</p>
+            </div>
+            <div class="text-right">
+                <div class="text-2xl font-mono" id="reloj">00:00:00</div>
+                <div class="text-sm text-green-400" id="status">Conectado</div>
+            </div>
+        </div>
+
+        <div class="bg-slate-800 rounded-lg overflow-hidden shadow-xl border border-slate-700">
+            <table class="w-full text-left">
+                <thead class="bg-slate-700 text-slate-300 uppercase text-sm">
+                    <tr>
+                        <th class="p-4">Hora</th>
+                        <th class="p-4">Bus</th>
+                        <th class="p-4">Origen</th>
+                        <th class="p-4">Destino</th>
+                        <th class="p-4">T. Restante</th>
+                        <th class="p-4 text-center">Estado GPS</th>
+                    </tr>
+                </thead>
+                <tbody id="tabla-body" class="divide-y divide-slate-700">
+                    <tr><td colspan="6" class="p-8 text-center text-slate-500">Cargando datos...</td></tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <script>
+        // Reloj
+        setInterval(() => {
+            document.getElementById('reloj').innerText = new Date().toLocaleTimeString();
+        }, 1000);
+
+        async function cargarTablero() {
+            try {
+                const res = await fetch('http://localhost:3000/api/tablero');
+                const data = await res.json();
+                const tbody = document.getElementById('tabla-body');
+                tbody.innerHTML = '';
+
+                if (data.turnos.length === 0) {
+                    tbody.innerHTML = '<tr><td colspan="6" class="p-8 text-center">No hay turnos próximos</td></tr>';
+                    return;
+                }
+
+                data.turnos.forEach(t => {
+                    // Colores de estado
+                    let badgeClass = "bg-slate-600 text-slate-200"; // Default
+                    if (t.color_estado === "green") badgeClass = "bg-green-900 text-green-300 border border-green-700";
+                    if (t.color_estado === "red") badgeClass = "bg-red-900 text-red-300 border border-red-700 animate-pulse";
+                    if (t.color_estado === "blue") badgeClass = "bg-blue-900 text-blue-300 border border-blue-700";
+
+                    // Formato tiempo restante
+                    let tiempoRestante = t.minutos_para_salir + " min";
+                    if (t.minutos_para_salir < 0) tiempoRestante = "YA SALIÓ (" + Math.abs(t.minutos_para_salir) + "m)";
+
+                    const row = `
+                        <tr class="hover:bg-slate-700/50 transition">
+                            <td class="p-4 font-mono text-xl text-yellow-400 font-bold">${t.hora}</td>
+                            <td class="p-4 font-bold text-lg">${t.bus}</td>
+                            <td class="p-4 text-slate-300">${t.origen}</td>
+                            <td class="p-4 text-slate-300">${t.destino}</td>
+                            <td class="p-4 font-mono ${t.minutos_para_salir < 10 && t.minutos_para_salir > 0 ? 'text-red-400' : 'text-slate-400'}">
+                                ${tiempoRestante}
+                            </td>
+                            <td class="p-4 text-center">
+                                <span class="px-3 py-1 rounded-full text-xs font-bold uppercase tracking-wider ${badgeClass}">
+                                    ${t.estado_bus}
+                                </span>
+                            </td>
+                        </tr>
+                    `;
+                    tbody.innerHTML += row;
+                });
+                
+                document.getElementById('status').innerText = "Actualizado: " + data.actualizado;
+
+            } catch (error) {
+                console.error(error);
+                document.getElementById('status').innerText = "Error de conexión";
+                document.getElementById('status').className = "text-sm text-red-500";
+            }
+        }
+
+        // Actualizar cada 30 segundos
+        cargarTablero();
+        setInterval(cargarTablero, 30000);
+    </script>
+</body>
+</html>

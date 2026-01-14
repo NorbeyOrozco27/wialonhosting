@@ -1,4 +1,3 @@
-// lib/wialon.ts
 import axios from 'axios';
 
 // Función para obtener mensajes crudos de una lista de unidades
@@ -17,7 +16,6 @@ export async function obtenerMensajesRaw(unitIds: number[], desde: number, hasta
 
     const resultados: any[] = [];
 
-    // Hacemos peticiones en paralelo (limitado para no saturar)
     // Procesamos de a 5 buses a la vez
     const chunk = 5;
     for (let i = 0; i < unitIds.length; i += chunk) {
@@ -25,10 +23,17 @@ export async function obtenerMensajesRaw(unitIds: number[], desde: number, hasta
         
         const promesas = lote.map(async (unitId) => {
             try {
-                // messages/load_interval: La fuente de la verdad
-                const url = `https://hst-api.wialon.com/wialon/ajax.html?svc=messages/load_interval&params={"itemId":${unitId},"timeFrom":${desde},"timeTo":${hasta},"flags":0,"flagsMask":65280,"loadCount":5000}&sid=${sid}`;
+                // 🔥 loadCount: 50000 (Vital para tener el día completo)
+                const url = `https://hst-api.wialon.com/wialon/ajax.html?svc=messages/load_interval&params={"itemId":${unitId},"timeFrom":${desde},"timeTo":${hasta},"flags":1,"flagsMask":1,"loadCount":50000}&sid=${sid}`;
+                
                 const res = await axios.get(url);
-                return { unitId, messages: res.data.messages || [] };
+                const msgs = res.data.messages || [];
+                
+                if (msgs.length >= 49900) {
+                    console.warn(`⚠️ ALERTA: Bus ${unitId} saturó el límite de 50k mensajes.`);
+                }
+                
+                return { unitId, messages: msgs };
             } catch (e) {
                 console.error(`Error bus ${unitId}`, e);
                 return { unitId, messages: [] };
@@ -41,7 +46,7 @@ export async function obtenerMensajesRaw(unitIds: number[], desde: number, hasta
 
     await axios.get(`https://hst-api.wialon.com/wialon/ajax.html?svc=core/logout&params={}&sid=${sid}`);
     
-    return resultados; // Retorna array de objetos { unitId: 123, messages: [...] }
+    return resultados;
 
   } catch (e: any) {
     if (sid) axios.get(`https://hst-api.wialon.com/wialon/ajax.html?svc=core/logout&params={}&sid=${sid}`).catch(()=>{});
@@ -49,8 +54,6 @@ export async function obtenerMensajesRaw(unitIds: number[], desde: number, hasta
   }
 }
 
-// Función auxiliar para buscar ID por nombre (útil para el mapeo inicial)
 export async function buscarIdVehiculo(nombre: string, sid: string): Promise<number | null> {
-    // Implementación simplificada si la necesitamos, por ahora audit-batch maneja esto
     return null;
 }

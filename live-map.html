@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Radar TransUnidos</title>
+    <meta charset="utf-8">
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <!-- Icono de Bus (opcional, usamos círculos por ahora) -->
+    <style>
+        body { margin: 0; padding: 0; }
+        #map { height: 100vh; width: 100%; }
+        .info-box {
+            position: absolute; top: 10px; right: 10px; z-index: 1000;
+            background: white; padding: 10px; border-radius: 5px; box-shadow: 0 0 5px rgba(0,0,0,0.3);
+            font-family: sans-serif;
+        }
+    </style>
+</head>
+<body>
+    <div class="info-box">
+        🚌 Buses en Vivo: <span id="contador">0</span><br>
+        <small id="last-update">Esperando datos...</small>
+    </div>
+    <div id="map"></div>
+
+    <script>
+        // Centrado en Rionegro/La Ceja
+        const map = L.map('map').setView([6.08, -75.40], 12);
+        
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+            attribution: '&copy; OpenStreetMap'
+        }).addTo(map);
+
+        const busLayer = L.layerGroup().addTo(map);
+
+        async function actualizar() {
+            try {
+                // Llama a tu servidor local
+                const response = await fetch('http://localhost:3000/api/live-radar');
+                const data = await response.json();
+
+                if (data.buses) {
+                    busLayer.clearLayers();
+                    
+                    data.buses.forEach(bus => {
+                        // Color: Rojo si está quieto (0 km/h), Verde si se mueve
+                        const color = bus.velocidad > 0 ? 'green' : 'red';
+                        L.circleMarker([bus.lat, bus.lon], {
+                            radius: 6,
+                            fillColor: color,
+                            color: "#000",
+                            weight: 1,
+                            opacity: 1,
+                            fillOpacity: 0.8
+                        }).bindPopup(`
+                            <div style="text-align:center">
+                                <b style="font-size:1.2em">Bus ${bus.bus}</b><br>
+                                <hr style="margin:5px 0">
+                                Velocidad: ${bus.velocidad} km/h<br>
+                                Ubicación: <b>${bus.estado_geocerca || 'EN RUTA'}</b>
+                            </div>
+                        `).addTo(busLayer);
+                        
+                    });
+
+                    document.getElementById('contador').innerText = data.total;
+                    document.getElementById('last-update').innerText = new Date().toLocaleTimeString();
+                }
+            } catch (error) {
+                console.error("Error al conectar con el servidor:", error);
+            }
+        }
+
+        // Actualizar cada 10 segundos (para no saturar la API, 6 peticiones/minuto es seguro)
+        setInterval(actualizar, 10000);
+        actualizar(); // Primera carga inmediata
+    </script>
+</body>
+</html>

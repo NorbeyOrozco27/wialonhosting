@@ -1,5 +1,5 @@
 // lib/util.ts
-import { obtenerCoordenadas, calcularDistancia } from './config.js';
+import { obtenerCoordenadas, calcularDistancia } from './config';
 
 export interface ResultadoAuditoria {
   evento: string;

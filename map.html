@@ -1,0 +1,138 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Mapa Real - Custom Nimbus</title>
+    <!-- Leaflet CSS -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <!-- Firebase -->
+    <script src="https://www.gstatic.com/firebasejs/9.22.0/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/9.22.0/firebase-firestore-compat.js"></script>
+    <style>
+        body { margin: 0; padding: 0; font-family: sans-serif; }
+        #map { height: 95vh; width: 100%; }
+        .controls { padding: 10px; background: #222; color: white; display: flex; justify-content: space-between; align-items: center; }
+        .legend span { display: inline-block; width: 10px; height: 10px; margin-right: 5px; border-radius: 50%; }
+    </style>
+</head>
+<body>
+
+    <div class="controls">
+        <div>
+            <span style="font-weight:bold; font-size: 1.2em;">🗺️ Auditoría GPS</span>
+            <span style="margin-left: 20px; color: #aaa;">Fecha: <span id="fecha-actual"></span></span>
+        </div>
+        <div class="legend">
+            <span style="background:green;"></span>A Tiempo
+            <span style="background:orange; margin-left:10px;"></span>Adelantado
+            <span style="background:red; margin-left:10px;"></span>Retrasado
+            <button onclick="cargarDatos()" style="margin-left:20px; padding:5px 15px; cursor:pointer; background:#007bff; border:none; color:white; border-radius:4px;">🔄 Recargar</button>
+        </div>
+    </div>
+    <div id="map"></div>
+
+    <script>
+        const firebaseConfig = {
+            apiKey: "AIzaSyAol0w5E2j0eELYpUBfTP-O8YBP1XhQBXg",
+            authDomain: "custom-nimbus.firebaseapp.com",
+            projectId: "custom-nimbus",
+            storageBucket: "custom-nimbus.firebasestorage.app",
+            messagingSenderId: "104889583578",
+            appId: "1:104889583578:web:c79bb365c83f91291362e3"
+        };
+        
+        firebase.initializeApp(firebaseConfig);
+        const db = firebase.firestore();
+
+        // Mapa centrado en Medellín/Oriente
+        const map = L.map('map').setView([6.15, -75.45], 11);
+        
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+            attribution: '&copy; OpenStreetMap contributors'
+        }).addTo(map);
+
+        let markersLayer = L.layerGroup().addTo(map);
+
+        async function cargarDatos() {
+            markersLayer.clearLayers();
+            
+            // Fecha dinámica (HOY)
+            // Si necesitas ver ayer, cambia esto manualmente a "2026-01-06"
+            const hoyStr = new Date().toLocaleDateString('en-CA', {timeZone: 'America/Bogota'});
+            // const hoyStr = "2026-01-06"; // Descomentar para pruebas históricas
+
+            document.getElementById('fecha-actual').innerText = hoyStr;
+            console.log(`Cargando datos del ${hoyStr}...`);
+
+            try {
+                const snapshot = await db.collection('auditoria_viajes')
+                                         .where('fecha', '==', hoyStr)
+                                         .get();
+
+                if (snapshot.empty) {
+                    alert("No hay datos para la fecha: " + hoyStr);
+                    return;
+                }
+
+                let bounds = [];
+
+                snapshot.forEach(doc => {
+                    const d = doc.data();
+                    let lat = d.latitud_real;
+                    let lon = d.longitud_real;
+
+                    // Si no tiene coords reales, usar las de la terminal (Respaldo)
+                    if (!lat || !lon) {
+                        if(d.geocerca_origen.includes("CEJA")) { lat=6.0313; lon=-75.4281; }
+                        else if(d.geocerca_origen.includes("NORTE")) { lat=6.2783; lon=-75.5706; }
+                        else if(d.geocerca_origen.includes("SUR")) { lat=6.2161; lon=-75.5879; }
+                        else if(d.geocerca_origen.includes("RIONEGRO")) { lat=6.1515; lon=-75.3730; }
+                    }
+
+                    if (lat && lon) {
+                        let color = 'green';
+                        if (d.estado === 'RETRASADO') color = 'red';
+                        if (d.estado === 'ADELANTADO') color = 'orange';
+
+                        const marker = L.circleMarker([lat, lon], {
+                            color: 'white',
+                            weight: 1,
+                            fillColor: color,
+                            fillOpacity: 0.8,
+                            radius: 8
+                        });
+
+                        marker.bindPopup(`
+                            <div style="text-align:center;">
+                                <strong style="font-size:1.2em;">Bus ${d.bus}</strong><br>
+                                <span style="color:${color}; font-weight:bold;">${d.estado}</span><br>
+                                <hr style="margin:5px 0;">
+                                Ruta: ${d.ruta}<br>
+                                Prog: ${d.programado} | Real: ${d.gps_salida_detectada}<br>
+                                <small>Geocerca: ${d.geocerca_origen}</small>
+                            </div>
+                        `);
+
+                        markersLayer.addLayer(marker);
+                        bounds.push([lat, lon]);
+                    }
+                });
+
+                // Auto-zoom para ver todos los puntos
+                if (bounds.length > 0) {
+                    map.fitBounds(bounds);
+                }
+
+            } catch (error) {
+                console.error("Error cargando mapa:", error);
+                alert("Error de lectura: " + error.message);
+            }
+        }
+
+        // Cargar al inicio
+        cargarDatos();
+    </script>
+</body>
+</html>

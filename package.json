@@ -1,7 +1,6 @@
 {
   "name": "wialon-hosting",
   "version": "1.0.0",
-  "type": "module",
   "description": "",
   "main": "index.js",
   "scripts": {
@@ -17,8 +16,13 @@
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.89.0",
+    "@turf/boolean-point-in-polygon": "^7.3.2",
+    "@turf/helpers": "^7.3.2",
+    "@types/express": "^5.0.6",
     "axios": "^1.13.2",
+    "cors": "^2.8.5",
+    "dotenv": "^17.2.3",
+    "express": "^5.2.1",
     "firebase-admin": "^13.6.0"
   }
 }
-
