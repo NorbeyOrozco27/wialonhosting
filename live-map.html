@@ -1,79 +1,219 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Radar TransUnidos</title>
+    <title>Radar TransUnidos - Satélite Google</title>
     <meta charset="utf-8">
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-    <!-- Icono de Bus (opcional, usamos círculos por ahora) -->
     <style>
-        body { margin: 0; padding: 0; }
+        body { margin: 0; padding: 0; font-family: 'Segoe UI', sans-serif; }
         #map { height: 100vh; width: 100%; }
-        .info-box {
-            position: absolute; top: 10px; right: 10px; z-index: 1000;
-            background: white; padding: 10px; border-radius: 5px; box-shadow: 0 0 5px rgba(0,0,0,0.3);
-            font-family: sans-serif;
+        
+        .stats-panel {
+            position: absolute; top: 10px; left: 60px; z-index: 1000;
+            background: rgba(0, 0, 0, 0.85); color: white;
+            padding: 10px 15px; border-radius: 6px; 
+            border: 1px solid #555;
+            backdrop-filter: blur(4px);
+            box-shadow: 0 4px 6px rgba(0,0,0,0.3);
         }
+
+        /* DISEÑO DE ETIQUETAS */
+        .bus-marker {
+            background: white; 
+            color: #333;
+            font-weight: 800; 
+            font-size: 11px; 
+            text-align: center;
+            white-space: nowrap;
+            box-shadow: 2px 2px 5px rgba(0,0,0,0.6);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        /* TIPOS DE VEHÍCULO (Colores y Bordes) */
+        .bus-marker.Microbus { 
+            border: 2px solid #f97316; /* Naranja */
+            border-radius: 4px; /* Cuadrado redondeado */
+        }
+        .bus-marker.Bus { 
+            border: 2px solid #3b82f6; /* Azul */
+            border-radius: 2px; /* Cuadrado recto */
+        }
+        .bus-marker.Buseta { 
+            border: 2px solid #10b981; /* Verde */
+            border-radius: 4px; 
+        }
+        .bus-marker.Vans { 
+            border: 2px solid #a855f7; /* Morado */
+            border-radius: 50%; /* Círculo perfecto */
+            width: 34px !important; /* Forzar círculo */
+        }
+        
+        /* PUNTOS DE ESTADO (Movimiento) */
+        .status-dot {
+            display: inline-block; width: 6px; height: 6px; border-radius: 50%;
+            margin-right: 4px;
+        }
+        .moving { background: #22c55e; box-shadow: 0 0 4px #22c55e; }
+        .stopped { background: #ef4444; }
+
     </style>
 </head>
 <body>
-    <div class="info-box">
-        🚌 Buses en Vivo: <span id="contador">0</span><br>
-        <small id="last-update">Esperando datos...</small>
+
+    <div class="stats-panel">
+        <b>📡 Flota en Vivo:</b> <span id="total-buses">0</span>
+        <div style="margin-top:8px; font-size: 0.8em; color: #ccc; line-height: 1.5;">
+            <div style="display:flex; align-items:center;"><span style="display:inline-block; width:8px; height:8px; background:#3b82f6; margin-right:5px;"></span> Bus (Azul)</div>
+            <div style="display:flex; align-items:center;"><span style="display:inline-block; width:8px; height:8px; background:#10b981; margin-right:5px;"></span> Buseta (Verde)</div>
+            <div style="display:flex; align-items:center;"><span style="display:inline-block; width:8px; height:8px; background:#f97316; margin-right:5px;"></span> Micro (Naranja)</div>
+            <div style="display:flex; align-items:center;"><span style="display:inline-block; width:8px; height:8px; background:#a855f7; border-radius:50%; margin-right:5px;"></span> Van (Círculo Morado)</div>
+        </div>
     </div>
+
+    <!-- Buscador -->
+    <div style="position:absolute; top:10px; right:10px; z-index:1000;">
+        <input type="text" id="buscador" placeholder="Buscar Móvil..." 
+               style="padding:8px; border-radius:4px; border:1px solid #ccc; width:150px;">
+        <button onclick="buscarBus()" style="padding:8px; background:#3b82f6; color:white; border:none; border-radius:4px; cursor:pointer;">🔍</button>
+    </div>
+
     <div id="map"></div>
 
     <script>
-        // Centrado en Rionegro/La Ceja
-        const map = L.map('map').setView([6.08, -75.40], 12);
+        const map = L.map('map').setView([6.05, -75.40], 13);
         
-        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-            attribution: '&copy; OpenStreetMap'
+        L.tileLayer('http://{s}.google.com/vt/lyrs=s,h&x={x}&y={y}&z={z}',{
+            maxZoom: 20,
+            subdomains:['mt0','mt1','mt2','mt3']
         }).addTo(map);
 
         const busLayer = L.layerGroup().addTo(map);
+        const zoneLayer = L.layerGroup().addTo(map);
+
+        // Cargar Geocercas
+        async function cargarGeocercas() {
+            try {
+                const res = await fetch('/geocercas');
+                const geojson = await res.json();
+                L.geoJSON(geojson, {
+                    style: { color: "#fbbf24", weight: 2, opacity: 0.9, fillColor: "#fbbf24", fillOpacity: 0.15 },
+                    onEachFeature: function (feature, layer) {
+                        layer.bindTooltip(feature.properties.nombre, {permanent: true, direction: "center", className: "geofence-label"});
+                    }
+                }).addTo(zoneLayer);
+            } catch (e) {}
+        }
+        cargarGeocercas();
+
+        const marcadoresExistentes = {};
+        const rutasBuses = {};
 
         async function actualizar() {
             try {
-                // Llama a tu servidor local
                 const response = await fetch('http://localhost:3000/api/live-radar');
                 const data = await response.json();
 
                 if (data.buses) {
-                    busLayer.clearLayers();
-                    
+                    const busesActuales = new Set();
+
                     data.buses.forEach(bus => {
-                        // Color: Rojo si está quieto (0 km/h), Verde si se mueve
-                        const color = bus.velocidad > 0 ? 'green' : 'red';
-                        L.circleMarker([bus.lat, bus.lon], {
-                            radius: 6,
-                            fillColor: color,
-                            color: "#000",
-                            weight: 1,
-                            opacity: 1,
-                            fillOpacity: 0.8
-                        }).bindPopup(`
-                            <div style="text-align:center">
-                                <b style="font-size:1.2em">Bus ${bus.bus}</b><br>
-                                <hr style="margin:5px 0">
-                                Velocidad: ${bus.velocidad} km/h<br>
-                                Ubicación: <b>${bus.estado_geocerca || 'EN RUTA'}</b>
+                        busesActuales.add(bus.bus);
+                        const isMoving = bus.velocidad > 0;
+                        const statusClass = isMoving ? 'moving' : 'stopped';
+
+                        // Rastro
+                        if (!rutasBuses[bus.bus]) {
+                            let colorRuta = '#3388ff';
+                            if (bus.tipo === 'Microbus') colorRuta = '#f97316';
+                            if (bus.tipo === 'Buseta') colorRuta = '#10b981';
+                            if (bus.tipo === 'Vans') colorRuta = '#a855f7';
+                            rutasBuses[bus.bus] = L.polyline([], { color: colorRuta, weight: 3, opacity: 0.6 }).addTo(map);
+                        }
+                        rutasBuses[bus.bus].addLatLng([bus.lat, bus.lon]);
+                        if (rutasBuses[bus.bus].getLatLngs().length > 30) {
+                             const points = rutasBuses[bus.bus].getLatLngs();
+                             points.shift();
+                             rutasBuses[bus.bus].setLatLngs(points);
+                        }
+
+                        // Popup
+                        const popupContent = `
+                            <div style="font-family: sans-serif; min-width: 200px;">
+                                <div style="background:#111; color:white; padding:5px; border-radius:4px 4px 0 0; text-align:center;">
+                                    <strong style="font-size:1.3em">Móvil ${bus.bus}</strong> <small style="color:#aaa">(${bus.tipo})</small>
+                                </div>
+                                <div style="background:#7e22ce; color:white; text-align:center; padding:3px; font-weight:bold; font-size:0.9em; letter-spacing: 1px;">
+                                    ${bus.tabla || 'Sin Tabla'}
+                                </div>
+                                <div style="padding:10px; border:1px solid #ccc; border-top:none; background:white; color:#333;">
+                                    <div style="margin-bottom:5px; display:flex; justify-content:space-between;">
+                                        <span>📍 Ubicación:</span>
+                                        <b style="color:#0284c7">${bus.estado_geocerca}</b>
+                                    </div>
+                                    <div style="margin-bottom:5px; display:flex; justify-content:space-between;">
+                                        <span>🕒 Salida:</span>
+                                        <b>${bus.hora_salida}</b>
+                                    </div>
+                                    <div style="margin-bottom:8px;">
+                                        <span style="display:block; font-size:0.85em; color:#666;">Ruta:</span>
+                                        <b style="font-size:1.1em">${bus.ruta}</b>
+                                    </div>
+                                    <p style="margin:0; color:#059669; font-weight:bold;">${bus.estado_tiempo}</p>
+                                    <hr style="margin:8px 0; border-color:#eee;">
+                                    <div style="font-size:0.85em; color:#666; text-align:center;">
+                                        GPS: En ruta a <b>${bus.velocidad} km/h</b>
+                                    </div>
+                                </div>
                             </div>
-                        `).addTo(busLayer);
-                        
+                        `;
+
+                        // Icono diferenciado
+                        const customIcon = L.divIcon({
+                            html: `<div class="bus-marker ${bus.tipo}">
+                                    <span class="status-dot ${statusClass}"></span>${bus.bus}
+                                   </div>`,
+                            className: '',
+                            iconSize: [40, 20], 
+                            iconAnchor: [20, 10]
+                        });
+
+                        if (marcadoresExistentes[bus.bus]) {
+                            const marker = marcadoresExistentes[bus.bus];
+                            marker.setLatLng([bus.lat, bus.lon]);
+                            marker.setIcon(customIcon);
+                            if (marker.getPopup()) marker.setPopupContent(popupContent);
+                        } else {
+                            const newMarker = L.marker([bus.lat, bus.lon], { icon: customIcon }).bindPopup(popupContent);
+                            newMarker.addTo(busLayer);
+                            marcadoresExistentes[bus.bus] = newMarker;
+                        }
                     });
 
-                    document.getElementById('contador').innerText = data.total;
-                    document.getElementById('last-update').innerText = new Date().toLocaleTimeString();
+                    for (const busId in marcadoresExistentes) {
+                        if (!busesActuales.has(busId)) {
+                            busLayer.removeLayer(marcadoresExistentes[busId]);
+                            if(rutasBuses[busId]) { map.removeLayer(rutasBuses[busId]); delete rutasBuses[busId]; }
+                            delete marcadoresExistentes[busId];
+                        }
+                    }
+                    document.getElementById('total-buses').innerText = data.total;
                 }
-            } catch (error) {
-                console.error("Error al conectar con el servidor:", error);
-            }
+            } catch (error) { console.error(error); }
+        }
+        
+        function buscarBus() {
+            const numero = document.getElementById('buscador').value.trim();
+            if(!numero) return;
+            const marker = marcadoresExistentes[numero];
+            if(marker) { map.setView(marker.getLatLng(), 18); marker.openPopup(); } 
+            else { alert("Bus no encontrado o inactivo"); }
         }
 
-        // Actualizar cada 10 segundos (para no saturar la API, 6 peticiones/minuto es seguro)
-        setInterval(actualizar, 10000);
-        actualizar(); // Primera carga inmediata
+        setInterval(actualizar, 3000);
+        actualizar();
     </script>
 </body>
 </html>

@@ -3,14 +3,18 @@ import cors from 'cors';
 import { config } from 'dotenv';
 import path from 'path';
 
-// Importamos los manejadores (handlers)
+// 1. CARGAR VARIABLES DE ENTORNO PRIMERO
+// Esto debe ejecutarse antes de importar cualquier archivo que use process.env (como supabase.ts)
+config();
+
+// 2. IMPORTAR MÓDULOS LOCALES
+// Usamos require para evitar problemas de orden de inicialización
 const liveRadarModule = require('./api/live-radar');
 const liveRadarHandler = liveRadarModule.default || liveRadarModule;
 
 const tableroModule = require('./api/tablero');
 const tableroHandler = tableroModule.default || tableroModule;
 
-config();
 const app = express();
 const PORT = 3000;
 
@@ -46,12 +50,17 @@ app.get('/', (req, res) => {
 app.get('/tablero', (req, res) => {
     res.sendFile(path.resolve(__dirname, 'dashboard.html'));
 });
-
+// Ruta para servir el archivo de geocercas al frontend
+app.get('/geocercas', (req, res) => {
+    // Busca el archivo en la raíz del proyecto
+    res.sendFile(path.resolve(__dirname, 'geocercas.json'));
+});
 // Iniciar servidor
 app.listen(PORT, () => {
     console.log(`
     🚀 Servidor TransUnidos ACTIVO
     -----------------------------------
+    ✅ Variables de entorno cargadas
     🗺️  Mapa en Vivo:    http://localhost:${PORT}
     ✈️  Tablero Turnos:  http://localhost:${PORT}/tablero
     -----------------------------------
